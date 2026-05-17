@@ -1,0 +1,35 @@
+{
+  "name": "@decision3/interouter-near",
+  "version": "0.1.0",
+  "description": "NEAR Protocol chain adapter for @decision3/interouter-core.",
+  "license": "MIT",
+  "author": "Decision3",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "near-api-js": "^7.2.0"
+  },
+  "peerDependencies": {
+    "@decision3/interouter-core": "^0.1.0"
+  },
+  "devDependencies": {
+    "@decision3/interouter-core": "*",
+    "tsx": "^4.22.1",
+    "typescript": "^5.4.0"
+  }
+}
