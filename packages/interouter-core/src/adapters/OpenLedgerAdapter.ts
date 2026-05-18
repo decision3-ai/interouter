@@ -272,7 +272,11 @@ export class OpenLedgerAdapter implements ChainAdapter<OpenLedgerState> {
       "Content-Type": "application/json",
     };
     if (payment !== null) {
-      headers["X-PAYMENT"] = btoa(JSON.stringify(payment));
+      // bigint fields (amount, validAfter, validBefore) must be serialised as
+      // decimal strings — JSON.stringify throws on bigint by default.
+      headers["X-PAYMENT"] = btoa(
+        JSON.stringify(payment, (_, v) => (typeof v === "bigint" ? v.toString() : v)),
+      );
     }
     return fetch(this.config.inferenceEndpoint, {
       method: "POST",
