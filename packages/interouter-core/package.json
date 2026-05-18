@@ -22,6 +22,10 @@
     "test": "tsx --test src/router.test.ts",
     "clean": "rm -rf dist"
   },
+  "dependencies": {
+    "near-api-js": "^7.2.0",
+    "viem": "^2.49.3"
+  },
   "devDependencies": {
     "tsx": "^4.22.1",
     "typescript": "^5.4.0"
