@@ -1,4 +1,4 @@
-import { JsonRpcProvider } from "near-api-js";
+import { JsonRpcProvider, yoctoToNear } from "near-api-js";
 import type { ChainAdapter, RouteContext } from "../router.js";
 
 // ---------------------------------------------------------------------------
@@ -21,12 +21,18 @@ export interface NearAdapterConfig {
 // ---------------------------------------------------------------------------
 
 export interface NearBalance {
-  /** Total balance in yoctoNEAR (string — value exceeds JS number precision). */
+  /** Total balance in yoctoNEAR (raw string — exceeds JS number precision). */
   total: string;
   /** Liquid available balance in yoctoNEAR. */
   available: string;
   /** Staked / locked balance in yoctoNEAR. */
   staked: string;
+  /** Total balance as a human-readable NEAR decimal string, e.g. "10.5". */
+  totalNear: string;
+  /** Available balance as a human-readable NEAR decimal string. */
+  availableNear: string;
+  /** Staked balance as a human-readable NEAR decimal string. */
+  stakedNear: string;
 }
 
 export interface NearAccountState {
@@ -50,6 +56,24 @@ export class NearAdapterError extends Error {
     super(message);
     this.name = "NearAdapterError";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Address validation
+//
+// NEAR supports two account ID formats:
+//   Implicit  — exactly 64 lowercase hex characters (public key as hex).
+//   Named     — 2–64 chars, lowercase alnum + _ - ., must start and end with
+//               an alphanumeric character.
+// ---------------------------------------------------------------------------
+
+const IMPLICIT_ACCOUNT_RE = /^[0-9a-f]{64}$/;
+const NAMED_ACCOUNT_RE    = /^[a-z0-9]([a-z0-9_.\\-]*[a-z0-9])?$/;
+
+export function isValidNearAccountId(id: string): boolean {
+  if (id.length < 2 || id.length > 64) return false;
+  if (id.length === 64 && IMPLICIT_ACCOUNT_RE.test(id)) return true;
+  return NAMED_ACCOUNT_RE.test(id);
 }
 
 // ---------------------------------------------------------------------------
@@ -77,9 +101,18 @@ export class NearAdapter implements ChainAdapter<NearAccountState> {
 
   async fetchState(context: RouteContext): Promise<NearAccountState> {
     const accountId = this.config.accountId ?? context.walletAddress;
+
     if (accountId === undefined || accountId === "") {
       throw new NearAdapterError(
         "NearAdapter: accountId is required — set it in config or provide context.walletAddress",
+      );
+    }
+
+    if (!isValidNearAccountId(accountId)) {
+      throw new NearAdapterError(
+        `NearAdapter: invalid account ID "${accountId}" — ` +
+        "must be a named account (2–64 chars, lowercase alnum + _ - .) " +
+        "or a 64-character hex implicit address",
       );
     }
 
@@ -91,13 +124,20 @@ export class NearAdapter implements ChainAdapter<NearAccountState> {
       account_id: accountId,
     });
 
-    const total = view.amount;
-    const staked = view.locked;
+    const total     = view.amount;
+    const staked    = view.locked;
     const available = (BigInt(total) - BigInt(staked)).toString();
 
     return {
       accountId,
-      balance: { total, available, staked },
+      balance: {
+        total,
+        available,
+        staked,
+        totalNear:     yoctoToNear(BigInt(total)),
+        availableNear: yoctoToNear(BigInt(available)),
+        stakedNear:    yoctoToNear(BigInt(staked)),
+      },
       storageUsage: view.storage_usage,
       codeHash: view.code_hash,
     };
