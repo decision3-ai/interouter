@@ -2,7 +2,11 @@
  * Core routing types and InterouterRouter class.
  *
  * Architecture:
- *   ChainAdapters fetch on-chain state in parallel.
+ *   ChainAdapters expose a five-stage lifecycle:
+ *     readState → preparePayment → sign → submit → awaitFinality
+ *   The router orchestrates these stages — read-only adapters complete at
+ *   readState; adapters that surface a PaymentRequirement proceed through
+ *   the full payment pipeline.
  *   InferenceProvider optionally enriches the aggregated payload with AI results.
  *   resolve() merges everything into a single RouteResult delivered to the frontend.
  */
@@ -22,14 +26,88 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 // ---------------------------------------------------------------------------
+// Payment lifecycle types
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal payment requirement — surfaced by readState() when a chain
+ * interaction requires payment before it can proceed.
+ * Adapter-specific types (e.g. X402PaymentRequirement) extend this base.
+ */
+export interface PaymentRequirement {
+  scheme: string;
+  network: string;
+  maxAmountRequired: string;
+}
+
+/** Wrapper returned by readState() — chain data + optional payment signal. */
+export interface ReadResult<TState = unknown> {
+  state: TState;
+  paymentRequired: PaymentRequirement | null;
+}
+
+/** Unsigned payment data prepared from a requirement. */
+export interface PaymentPayload {
+  requirement: PaymentRequirement;
+}
+
+/** Signed payment, ready for chain submission. */
+export interface SignedPayload {
+  payload: PaymentPayload;
+  signature: string;
+}
+
+/** Outcome of submitting a signed payment. */
+export interface SubmissionResult {
+  accepted: boolean;
+  txHash: string | null;
+  /** The requirement that was fulfilled — threaded for awaitFinality. */
+  requirement: PaymentRequirement;
+  /** Response body from the submission endpoint (e.g. inference result). */
+  responseData: unknown;
+}
+
+/** Finality confirmation + final adapter state after payment lifecycle. */
+export interface FinalityStatus<TState = unknown> {
+  finalized: boolean;
+  txHash: string | null;
+  state: TState;
+}
+
+// ---------------------------------------------------------------------------
+// NotSupportedError — thrown by read-only adapters
+// ---------------------------------------------------------------------------
+
+/** Thrown when a read-only adapter's payment method is called. */
+export class NotSupportedError extends Error {
+  constructor(adapterId: string, method: string) {
+    super(`${adapterId}: ${method}() is not supported — adapter is read-only`);
+    this.name = "NotSupportedError";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Chain adapter interface
 // ---------------------------------------------------------------------------
 
 export interface ChainAdapter<TState = unknown> {
-  /** Human-readable identifier, e.g. "near", "sui", "walrus" */
+  /** Human-readable identifier, e.g. "near", "sui", "openledger" */
   readonly id: string;
-  /** Fetch current on-chain state relevant to the given route context. */
-  fetchState(context: RouteContext): Promise<TState>;
+
+  /** Read current on-chain state. Returns a PaymentRequirement when payment is needed before the operation can complete. */
+  readState(context: RouteContext): Promise<ReadResult<TState>>;
+
+  /** Build an unsigned payment from the requirement surfaced by readState(). */
+  preparePayment(requirement: PaymentRequirement): Promise<PaymentPayload>;
+
+  /** Sign the prepared payment payload. */
+  sign(payload: PaymentPayload): Promise<SignedPayload>;
+
+  /** Submit the signed payment to the network. */
+  submit(signed: SignedPayload, context: RouteContext): Promise<SubmissionResult>;
+
+  /** Wait for on-chain finality and return the final adapter state. */
+  awaitFinality(result: SubmissionResult): Promise<FinalityStatus<TState>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +162,7 @@ export interface RouterConfig {
   adapters: ReadonlyArray<ChainAdapter>;
   /** Optional AI inference provider */
   aiProvider?: InferenceProvider;
-  /** Timeout in milliseconds for each adapter's fetchState (default: 5000) */
+  /** Timeout in milliseconds for each adapter's full lifecycle (default: 5000) */
   adapterTimeoutMs?: number;
 }
 
@@ -102,19 +180,22 @@ export class InterouterRouter {
   /**
    * Resolve a route context into a single aggregated RouteResult.
    *
-   * - All chain adapters are fetched in parallel via Promise.allSettled.
+   * - Each adapter's full lifecycle runs in parallel via Promise.allSettled.
+   * - Within a single adapter, stages execute sequentially:
+   *     readState → preparePayment → sign → submit → awaitFinality
+   * - readState-only adapters (paymentRequired === null) skip the payment stages.
    * - Each adapter is individually bounded by adapterTimeoutMs.
    * - Failed or timed-out adapters are recorded as AdapterError; resolve() never throws.
-   * - AI inference runs after fan-out completes, receiving the full chainState as input.
+   * - AI inference runs after all adapters complete, receiving the full chainState as input.
    */
   async resolve(context: RouteContext): Promise<RouteResult> {
     const start = Date.now();
     const timeoutMs = this.config.adapterTimeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS;
 
-    // Fan out — all adapters run in parallel, each guarded by a per-adapter timeout.
+    // Fan out — all adapter lifecycles run in parallel, each guarded by a per-adapter timeout.
     const settled = await Promise.allSettled(
       this.config.adapters.map((adapter) =>
-        withTimeout(adapter.fetchState(context), timeoutMs, adapter.id),
+        withTimeout(this.runAdapterLifecycle(adapter, context), timeoutMs, adapter.id),
       ),
     );
 
@@ -151,5 +232,28 @@ export class InterouterRouter {
       resolvedInMs: Date.now() - start,
       resolvedAt: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Runs a single adapter through its full lifecycle.
+   *
+   * If readState() signals paymentRequired, the payment pipeline is executed
+   * sequentially. Otherwise, the state from readState() is returned directly.
+   */
+  private async runAdapterLifecycle<TState>(
+    adapter: ChainAdapter<TState>,
+    context: RouteContext,
+  ): Promise<TState> {
+    const { state, paymentRequired } = await adapter.readState(context);
+
+    if (paymentRequired === null) {
+      return state;
+    }
+
+    const payload = await adapter.preparePayment(paymentRequired);
+    const signed = await adapter.sign(payload);
+    const submission = await adapter.submit(signed, context);
+    const finality = await adapter.awaitFinality(submission);
+    return finality.state;
   }
 }

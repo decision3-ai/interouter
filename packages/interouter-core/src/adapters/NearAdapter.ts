@@ -1,5 +1,15 @@
 import { JsonRpcProvider, yoctoToNear } from "near-api-js";
-import type { ChainAdapter, RouteContext } from "../router.js";
+import type {
+  ChainAdapter,
+  ReadResult,
+  PaymentRequirement,
+  PaymentPayload,
+  SignedPayload,
+  SubmissionResult,
+  FinalityStatus,
+  RouteContext,
+} from "../router.js";
+import { NotSupportedError } from "../router.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -10,7 +20,7 @@ export interface NearAdapterConfig {
   /** NEAR RPC endpoint, e.g. "https://rpc.mainnet.near.org" */
   nodeUrl: string;
   /**
-   * Fixed account to query. When omitted, fetchState() falls back to
+   * Fixed account to query. When omitted, readState() falls back to
    * context.walletAddress. Throws NearAdapterError if neither is present.
    */
   accountId?: string;
@@ -99,7 +109,11 @@ export class NearAdapter implements ChainAdapter<NearAccountState> {
     this.config = config;
   }
 
-  async fetchState(context: RouteContext): Promise<NearAccountState> {
+  // ---------------------------------------------------------------------------
+  // Lifecycle: readState
+  // ---------------------------------------------------------------------------
+
+  async readState(context: RouteContext): Promise<ReadResult<NearAccountState>> {
     const accountId = this.config.accountId ?? context.walletAddress;
 
     if (accountId === undefined || accountId === "") {
@@ -129,17 +143,40 @@ export class NearAdapter implements ChainAdapter<NearAccountState> {
     const available = (BigInt(total) - BigInt(staked)).toString();
 
     return {
-      accountId,
-      balance: {
-        total,
-        available,
-        staked,
-        totalNear:     yoctoToNear(BigInt(total)),
-        availableNear: yoctoToNear(BigInt(available)),
-        stakedNear:    yoctoToNear(BigInt(staked)),
+      state: {
+        accountId,
+        balance: {
+          total,
+          available,
+          staked,
+          totalNear:     yoctoToNear(BigInt(total)),
+          availableNear: yoctoToNear(BigInt(available)),
+          stakedNear:    yoctoToNear(BigInt(staked)),
+        },
+        storageUsage: view.storage_usage,
+        codeHash: view.code_hash,
       },
-      storageUsage: view.storage_usage,
-      codeHash: view.code_hash,
+      paymentRequired: null,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Payment methods — NEAR is read-only for MVP
+  // ---------------------------------------------------------------------------
+
+  async preparePayment(_requirement: PaymentRequirement): Promise<PaymentPayload> {
+    throw new NotSupportedError(this.id, "preparePayment");
+  }
+
+  async sign(_payload: PaymentPayload): Promise<SignedPayload> {
+    throw new NotSupportedError(this.id, "sign");
+  }
+
+  async submit(_signed: SignedPayload, _context: RouteContext): Promise<SubmissionResult> {
+    throw new NotSupportedError(this.id, "submit");
+  }
+
+  async awaitFinality(_result: SubmissionResult): Promise<FinalityStatus<NearAccountState>> {
+    throw new NotSupportedError(this.id, "awaitFinality");
   }
 }

@@ -6,6 +6,7 @@ import {
   NearAdapterError,
   isValidNearAccountId,
 } from "./NearAdapter.js";
+import { NotSupportedError } from "../router.js";
 import type { NearAdapterConfig } from "./NearAdapter.js";
 
 // ---------------------------------------------------------------------------
@@ -96,20 +97,20 @@ describe("NearAdapter", () => {
 
   });
 
-  // --- fetchState: address path end-to-end ---
+  // --- readState: address path end-to-end ---
 
   it("2. named .near address resolves without error", async () => {
     mockRpc(async () => MOCK_ACCOUNT_VIEW);
     const adapter = new NearAdapter(BASE_CONFIG);
-    const result = await adapter.fetchState(CTX_NAMED);
-    assert.equal(result.accountId, "alice.near");
+    const { state } = await adapter.readState(CTX_NAMED);
+    assert.equal(state.accountId, "alice.near");
   });
 
   it("3. 64-char hex implicit address resolves without error", async () => {
     mockRpc(async () => MOCK_ACCOUNT_VIEW);
     const adapter = new NearAdapter(BASE_CONFIG);
-    const result = await adapter.fetchState(CTX_IMPLICIT);
-    assert.equal(result.accountId, CTX_IMPLICIT.walletAddress);
+    const { state } = await adapter.readState(CTX_IMPLICIT);
+    assert.equal(state.accountId, CTX_IMPLICIT.walletAddress);
   });
 
   it("4. malformed address throws NearAdapterError before any RPC call", async () => {
@@ -119,7 +120,7 @@ describe("NearAdapter", () => {
     const adapter = new NearAdapter(BASE_CONFIG);
     for (const bad of ["Alice.near", "!invalid", "x"]) {
       await assert.rejects(
-        () => adapter.fetchState({ path: "/", params: {}, walletAddress: bad }),
+        () => adapter.readState({ path: "/", params: {}, walletAddress: bad }),
         (err: unknown) => {
           assert.ok(err instanceof NearAdapterError, `expected NearAdapterError for "${bad}"`);
           assert.ok(err.message.includes("invalid account ID"));
@@ -130,12 +131,13 @@ describe("NearAdapter", () => {
     assert.equal(rpcCalled, false, "RPC should never be called for malformed addresses");
   });
 
-  // --- fetchState: balance fields ---
+  // --- readState: balance fields ---
 
   it("5. yoctoNEAR → NEAR formatted fields are correct", async () => {
     mockRpc(async () => MOCK_ACCOUNT_VIEW);
     const adapter = new NearAdapter(BASE_CONFIG);
-    const { balance } = await adapter.fetchState(CTX_NAMED);
+    const { state } = await adapter.readState(CTX_NAMED);
+    const { balance } = state;
 
     // Raw yoctoNEAR strings preserved exactly.
     assert.equal(balance.total,     "10000000000000000000000000");
@@ -158,31 +160,40 @@ describe("NearAdapter", () => {
     mockRpc(async () => precisionView);
 
     const adapter = new NearAdapter(BASE_CONFIG);
-    const { balance } = await adapter.fetchState(CTX_NAMED);
+    const { state } = await adapter.readState(CTX_NAMED);
 
     const expected = (
       BigInt("9999999999999999999999999") - BigInt("1111111111111111111111111")
     ).toString();
-    assert.equal(balance.available, expected);
+    assert.equal(state.balance.available, expected);
   });
 
-  // --- fetchState: codeHash passthrough ---
+  // --- readState: codeHash passthrough ---
 
   it("7. codeHash '11111...' (no contract) and real hash both pass through unchanged", async () => {
     const adapter = new NearAdapter(BASE_CONFIG);
 
     mockRpc(async () => ({ ...MOCK_ACCOUNT_VIEW, code_hash: NO_CONTRACT_CODE_HASH }));
-    const noContract = await adapter.fetchState(CTX_NAMED);
+    const { state: noContract } = await adapter.readState(CTX_NAMED);
     assert.equal(noContract.codeHash, NO_CONTRACT_CODE_HASH);
 
     mock.restoreAll();
 
     mockRpc(async () => ({ ...MOCK_ACCOUNT_VIEW, code_hash: WITH_CONTRACT_CODE_HASH }));
-    const withContract = await adapter.fetchState(CTX_NAMED);
+    const { state: withContract } = await adapter.readState(CTX_NAMED);
     assert.equal(withContract.codeHash, WITH_CONTRACT_CODE_HASH);
   });
 
-  // --- fetchState: failure modes ---
+  // --- readState: paymentRequired always null ---
+
+  it("7b. readState always returns paymentRequired: null (NEAR is read-only)", async () => {
+    mockRpc(async () => MOCK_ACCOUNT_VIEW);
+    const adapter = new NearAdapter(BASE_CONFIG);
+    const result = await adapter.readState(CTX_NAMED);
+    assert.equal(result.paymentRequired, null);
+  });
+
+  // --- readState: failure modes ---
 
   it("8. missing accountId (no config, no walletAddress) throws NearAdapterError", async () => {
     let rpcCalled = false;
@@ -190,7 +201,7 @@ describe("NearAdapter", () => {
 
     const adapter = new NearAdapter(BASE_CONFIG);
     await assert.rejects(
-      () => adapter.fetchState(CTX_EMPTY),
+      () => adapter.readState(CTX_EMPTY),
       (err: unknown) => {
         assert.ok(err instanceof NearAdapterError);
         assert.ok(err.message.includes("accountId is required"));
@@ -207,7 +218,7 @@ describe("NearAdapter", () => {
 
     const adapter = new NearAdapter(BASE_CONFIG);
     await assert.rejects(
-      () => adapter.fetchState(CTX_NAMED),
+      () => adapter.readState(CTX_NAMED),
       (err: unknown) => {
         // The error propagates as-is from the RPC layer; the router's
         // Promise.allSettled wraps it into an AdapterError token.
@@ -225,8 +236,23 @@ describe("NearAdapter", () => {
     mockRpc(async () => MOCK_ACCOUNT_VIEW);
 
     const adapter = new NearAdapter({ ...BASE_CONFIG, accountId: "fixed.near" });
-    const result = await adapter.fetchState({ ...CTX_NAMED, walletAddress: "other.near" });
-    assert.equal(result.accountId, "fixed.near");
+    const { state } = await adapter.readState({ ...CTX_NAMED, walletAddress: "other.near" });
+    assert.equal(state.accountId, "fixed.near");
+  });
+
+  // --- Payment methods — read-only adapter ---
+
+  it("11. payment methods throw NotSupportedError", async () => {
+    const adapter = new NearAdapter(BASE_CONFIG);
+    const dummyReq = { scheme: "exact", network: "near", maxAmountRequired: "0" };
+    const dummyPayload = { requirement: dummyReq };
+    const dummySigned = { payload: dummyPayload, signature: "0x0" };
+    const dummyResult = { accepted: false, txHash: null, requirement: dummyReq, responseData: null };
+
+    await assert.rejects(() => adapter.preparePayment(dummyReq), NotSupportedError);
+    await assert.rejects(() => adapter.sign(dummyPayload), NotSupportedError);
+    await assert.rejects(() => adapter.submit(dummySigned, CTX_NAMED), NotSupportedError);
+    await assert.rejects(() => adapter.awaitFinality(dummyResult), NotSupportedError);
   });
 
 });

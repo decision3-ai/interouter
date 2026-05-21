@@ -1,7 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { InterouterRouter } from "./router.js";
-import type { ChainAdapter, InferenceProvider, RouteContext, AdapterError } from "./router.js";
+import { InterouterRouter, NotSupportedError } from "./router.js";
+import type {
+  ChainAdapter,
+  InferenceProvider,
+  RouteContext,
+  AdapterError,
+  PaymentRequirement,
+} from "./router.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -9,26 +15,69 @@ import type { ChainAdapter, InferenceProvider, RouteContext, AdapterError } from
 
 const ctx: RouteContext = { path: "/test", params: {} };
 
+/** Creates a read-only adapter that returns the given value from readState(). */
 function makeAdapter<T>(id: string, value: T, delayMs = 0): ChainAdapter<T> {
   return {
     id,
-    fetchState: () =>
-      new Promise((resolve) => setTimeout(() => resolve(value), delayMs)),
+    readState: () =>
+      new Promise((resolve) =>
+        setTimeout(() => resolve({ state: value, paymentRequired: null }), delayMs),
+      ),
+    preparePayment: () => { throw new NotSupportedError(id, "preparePayment"); },
+    sign: () => { throw new NotSupportedError(id, "sign"); },
+    submit: () => { throw new NotSupportedError(id, "submit"); },
+    awaitFinality: () => { throw new NotSupportedError(id, "awaitFinality"); },
   };
 }
 
 function makeFailingAdapter(id: string, message = "boom"): ChainAdapter {
   return {
     id,
-    fetchState: () => Promise.reject(new Error(message)),
+    readState: () => Promise.reject(new Error(message)),
+    preparePayment: () => { throw new NotSupportedError(id, "preparePayment"); },
+    sign: () => { throw new NotSupportedError(id, "sign"); },
+    submit: () => { throw new NotSupportedError(id, "submit"); },
+    awaitFinality: () => { throw new NotSupportedError(id, "awaitFinality"); },
   };
 }
 
 function makeSlowAdapter(id: string, delayMs: number): ChainAdapter {
   return {
     id,
-    fetchState: () =>
-      new Promise((resolve) => setTimeout(() => resolve({ slow: true }), delayMs)),
+    readState: () =>
+      new Promise((resolve) =>
+        setTimeout(() => resolve({ state: { slow: true }, paymentRequired: null }), delayMs),
+      ),
+    preparePayment: () => { throw new NotSupportedError(id, "preparePayment"); },
+    sign: () => { throw new NotSupportedError(id, "sign"); },
+    submit: () => { throw new NotSupportedError(id, "submit"); },
+    awaitFinality: () => { throw new NotSupportedError(id, "awaitFinality"); },
+  };
+}
+
+/** Creates an adapter that signals payment required and completes the full lifecycle. */
+function makePayingAdapter<T>(
+  id: string,
+  initialState: T,
+  finalState: T,
+  requirement: PaymentRequirement,
+): ChainAdapter<T> {
+  return {
+    id,
+    readState: async () => ({ state: initialState, paymentRequired: requirement }),
+    preparePayment: async (req) => ({ requirement: req }),
+    sign: async (payload) => ({ payload, signature: "0xfakesig" }),
+    submit: async (signed) => ({
+      accepted: true,
+      txHash: "0xdeadbeef",
+      requirement: signed.payload.requirement,
+      responseData: "inference-result",
+    }),
+    awaitFinality: async () => ({
+      finalized: true,
+      txHash: "0xdeadbeef",
+      state: finalState,
+    }),
   };
 }
 
@@ -169,6 +218,66 @@ describe("InterouterRouter.resolve()", () => {
 
     // Sequential would be ~160ms; parallel should be well under that.
     assert.ok(elapsed < 140, `adapters should run in parallel, took ${elapsed}ms`);
+  });
+
+  it("9. payment lifecycle — router orchestrates readState → preparePayment → sign → submit → awaitFinality", async () => {
+    const requirement: PaymentRequirement = {
+      scheme: "exact",
+      network: "test-net",
+      maxAmountRequired: "1000",
+    };
+
+    const router = new InterouterRouter({
+      adapters: [
+        makePayingAdapter(
+          "openledger",
+          { partial: true },       // initial state from readState
+          { complete: true },      // final state from awaitFinality
+          requirement,
+        ),
+      ],
+    });
+
+    const result = await router.resolve(ctx);
+
+    // The router should have run the full lifecycle and stored the final state.
+    assert.deepEqual(result.chainState["openledger"], { complete: true });
+  });
+
+  it("10. payment lifecycle failure — sign throws → AdapterError", async () => {
+    const requirement: PaymentRequirement = {
+      scheme: "exact",
+      network: "test-net",
+      maxAmountRequired: "1000",
+    };
+
+    const adapter: ChainAdapter = {
+      id: "broken-pay",
+      readState: async () => ({ state: { partial: true }, paymentRequired: requirement }),
+      preparePayment: async (req) => ({ requirement: req }),
+      sign: async () => { throw new Error("signing key expired"); },
+      submit: async (signed) => ({
+        accepted: true,
+        txHash: "0x0",
+        requirement: signed.payload.requirement,
+        responseData: null,
+      }),
+      awaitFinality: async () => ({
+        finalized: true,
+        txHash: "0x0",
+        state: {},
+      }),
+    };
+
+    const router = new InterouterRouter({ adapters: [adapter] });
+    const result = await router.resolve(ctx);
+
+    const entry = result.chainState["broken-pay"];
+    assert.ok(isAdapterError(entry), "broken-pay should be an AdapterError");
+    assert.ok(
+      (entry as AdapterError).reason.includes("signing key expired"),
+      `reason should contain signing error, got: ${(entry as AdapterError).reason}`,
+    );
   });
 
 });

@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { OpenLedgerAdapter, OpenLedgerAdapterError } from "./OpenLedgerAdapter.js";
 import type {
   OpenLedgerAdapterConfig,
-  PaymentPayload,
-  PaymentRequirement,
+  X402WirePayload,
+  X402PaymentRequirement,
 } from "./OpenLedgerAdapter.js";
 
 // ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ const BASE_CONFIG: OpenLedgerAdapterConfig = {
   privateKey: TEST_PRIVATE_KEY,
 };
 
-const SAMPLE_REQUIREMENT: PaymentRequirement = {
+const SAMPLE_REQUIREMENT: X402PaymentRequirement = {
   scheme: "exact",
   network: "bnb-testnet",
   maxAmountRequired: "1000000",
@@ -110,27 +110,46 @@ describe("OpenLedgerAdapter", () => {
     );
   });
 
-  // --- fetchState: free tier ---
+  // --- readState: free tier ---
 
-  it("4. free tier (200) — returns idle flow, inference result populated, no payment", async () => {
+  it("4. free tier (200) — readState returns idle flow, inference result populated, no payment required", async () => {
     const inferenceBody = { answer: "42", model: "dgrid-v1" };
     const spy = spyFetch(makeResponse(200, inferenceBody));
     globalThis.fetch = spy.fn;
 
     const adapter = new OpenLedgerAdapter(BASE_CONFIG);
-    const result = await adapter.fetchState({ path: "/infer", params: {} });
+    const { state, paymentRequired } = await adapter.readState({ path: "/infer", params: {} });
 
     assert.equal(spy.calls.length, 1, "should only make one request");
-    assert.deepEqual(result.inferenceResult, inferenceBody);
-    assert.equal(result.amountPaid, "0");
-    assert.equal(result.paymentTxHash, null);
-    assert.equal(result.tokenAddress, null);
-    assert.equal(result.flow.status, "idle");
+    assert.deepEqual(state.inferenceResult, inferenceBody);
+    assert.equal(state.amountPaid, "0");
+    assert.equal(state.paymentTxHash, null);
+    assert.equal(state.tokenAddress, null);
+    assert.equal(state.flow.status, "idle");
+    assert.equal(paymentRequired, null);
   });
 
-  // --- fetchState: x402 happy path ---
+  // --- readState: 402 surfaces payment requirement ---
 
-  it("5. x402 happy path — signs EIP-712, sends X-PAYMENT header, returns complete flow", async () => {
+  it("5. readState on 402 — surfaces payment requirement, no signing occurs", async () => {
+    const spy = spyFetch(makeResponse(402, { accepts: [SAMPLE_REQUIREMENT] }));
+    globalThis.fetch = spy.fn;
+
+    const adapter = new OpenLedgerAdapter(BASE_CONFIG);
+    const { state, paymentRequired } = await adapter.readState({ path: "/infer", params: {} });
+
+    assert.equal(spy.calls.length, 1, "readState should only make the initial request");
+    assert.ok(paymentRequired !== null, "paymentRequired should be set");
+    assert.equal(paymentRequired.scheme, "exact");
+    assert.equal(paymentRequired.network, "bnb-testnet");
+    assert.equal(paymentRequired.maxAmountRequired, "1000000");
+    assert.equal(state.inferenceResult, null);
+    assert.equal(state.flow.status, "payment_required");
+  });
+
+  // --- Full lifecycle: preparePayment → sign → submit → awaitFinality ---
+
+  it("6. full x402 lifecycle — preparePayment + sign + submit + awaitFinality produces complete state", async () => {
     const inferenceBody = { answer: "the meaning of life", model: "dgrid-v1" };
     const txHash = "0xdeadbeef00000000000000000000000000000000000000000000000000000001";
 
@@ -141,73 +160,92 @@ describe("OpenLedgerAdapter", () => {
     globalThis.fetch = spy.fn;
 
     const adapter = new OpenLedgerAdapter(BASE_CONFIG);
-    const result = await adapter.fetchState({ path: "/infer", params: {} });
+    const ctx = { path: "/infer", params: {} };
 
-    // Two requests made.
+    // Step 1: readState
+    const { paymentRequired } = await adapter.readState(ctx);
+    assert.ok(paymentRequired !== null);
+
+    // Step 2: preparePayment
+    const payload = await adapter.preparePayment(paymentRequired);
+    assert.ok(payload.requirement === paymentRequired);
+
+    // Step 3: sign
+    const signed = await adapter.sign(payload);
+    assert.ok(signed.signature.startsWith("0x") && signed.signature.length === 132,
+      `signature should be a 65-byte hex string, got: ${signed.signature}`,
+    );
+
+    // Step 4: submit
+    const submission = await adapter.submit(signed, ctx);
+    assert.equal(submission.accepted, true);
+    assert.equal(submission.txHash, txHash);
+
+    // Verify X-PAYMENT header was sent on the retry request.
     assert.equal(spy.calls.length, 2, "should make initial request and paid retry");
-
-    // Second request carries X-PAYMENT header.
     const secondRequest = spy.calls[1];
     assert.ok(secondRequest !== undefined);
     const paymentHeader = secondRequest.headers.get("X-PAYMENT");
     assert.ok(paymentHeader !== null, "X-PAYMENT header must be present on retry");
 
-    // Decode and validate the payment payload.
-    const decoded = JSON.parse(atob(paymentHeader)) as PaymentPayload;
+    // Decode and validate the wire payload.
+    const decoded = JSON.parse(atob(paymentHeader)) as X402WirePayload;
     assert.equal(decoded.x402Version, 1);
     assert.equal(decoded.scheme, "exact");
     assert.equal(decoded.network, "bnb-testnet");
-    assert.ok(
-      decoded.payload.signature.startsWith("0x") && decoded.payload.signature.length === 132,
-      `signature should be a 65-byte hex string, got: ${decoded.payload.signature}`,
-    );
     assert.equal(decoded.payload.authorization.recipient, TEST_RECIPIENT);
     assert.equal(decoded.payload.authorization.amount, "1000000");
     assert.equal(decoded.payload.authorization.from, TEST_SIGNER);
 
-    // Result shape.
-    assert.deepEqual(result.inferenceResult, inferenceBody);
-    assert.equal(result.amountPaid, "1000000");
-    assert.equal(result.tokenAddress, TEST_ASSET);
-    assert.equal(result.paymentTxHash, txHash);
-    assert.equal(result.flow.status, "complete");
-    if (result.flow.status === "complete") {
-      assert.equal(result.flow.txHash, txHash);
-      assert.equal(result.flow.amountPaid, "1000000");
-      assert.equal(result.flow.tokenAddress, TEST_ASSET);
+    // Step 5: awaitFinality
+    const finality = await adapter.awaitFinality(submission);
+    assert.equal(finality.finalized, true);
+    assert.equal(finality.txHash, txHash);
+    assert.deepEqual(finality.state.inferenceResult, inferenceBody);
+    assert.equal(finality.state.amountPaid, "1000000");
+    assert.equal(finality.state.tokenAddress, TEST_ASSET);
+    assert.equal(finality.state.paymentTxHash, txHash);
+    assert.equal(finality.state.flow.status, "complete");
+    if (finality.state.flow.status === "complete") {
+      assert.equal(finality.state.flow.txHash, txHash);
+      assert.equal(finality.state.flow.amountPaid, "1000000");
+      assert.equal(finality.state.flow.tokenAddress, TEST_ASSET);
     }
   });
 
-  // --- fetchState: signing failure ---
+  // --- sign failure ---
 
-  it("6. signing throws — returns failed stage, fetchState() never rejects", async () => {
+  it("7. sign throws on signing failure — error is explicit, not hidden", async () => {
     const spy = spyFetch(makeResponse(402, { accepts: [SAMPLE_REQUIREMENT] }));
     globalThis.fetch = spy.fn;
 
     const adapter = new OpenLedgerAdapter(BASE_CONFIG);
+    const { paymentRequired } = await adapter.readState({ path: "/infer", params: {} });
+    assert.ok(paymentRequired !== null);
+
+    const payload = await adapter.preparePayment(paymentRequired);
+
     // Monkey-patch the private account to simulate a viem signing failure.
     (adapter as unknown as { account: { signTypedData: () => Promise<never> } })
       .account.signTypedData = async () => {
         throw new Error("viem: domain separator mismatch");
       };
 
-    const result = await adapter.fetchState({ path: "/infer", params: {} });
+    await assert.rejects(
+      () => adapter.sign(payload),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.ok(err.message.includes("viem: domain separator mismatch"));
+        return true;
+      },
+    );
 
     assert.equal(spy.calls.length, 1, "should not retry after signing failure");
-    assert.equal(result.flow.status, "failed");
-    if (result.flow.status === "failed") {
-      assert.ok(
-        result.flow.reason.includes("viem: domain separator mismatch"),
-        `reason should contain the signing error, got: ${result.flow.reason}`,
-      );
-    }
-    assert.equal(result.inferenceResult, null);
-    assert.equal(result.amountPaid, "0");
   });
 
-  // --- fetchState: post-payment HTTP error ---
+  // --- submit: post-payment HTTP error ---
 
-  it("7. post-payment non-200 response — returns failed stage, does not throw", async () => {
+  it("8. submit returns accepted=false on post-payment non-200 response", async () => {
     const spy = spyFetch(
       makeResponse(402, { accepts: [SAMPLE_REQUIREMENT] }),
       makeResponse(503, { error: "service unavailable" }),
@@ -215,29 +253,41 @@ describe("OpenLedgerAdapter", () => {
     globalThis.fetch = spy.fn;
 
     const adapter = new OpenLedgerAdapter(BASE_CONFIG);
-    const result = await adapter.fetchState({ path: "/infer", params: {} });
+    const ctx = { path: "/infer", params: {} };
+    const { paymentRequired } = await adapter.readState(ctx);
+    assert.ok(paymentRequired !== null);
 
-    assert.equal(spy.calls.length, 2, "should attempt both requests");
-    assert.equal(result.flow.status, "failed");
-    if (result.flow.status === "failed") {
-      assert.ok(
-        result.flow.reason.includes("503"),
-        `reason should include HTTP status, got: ${result.flow.reason}`,
-      );
+    const payload = await adapter.preparePayment(paymentRequired);
+    const signed = await adapter.sign(payload);
+    const submission = await adapter.submit(signed, ctx);
+
+    assert.equal(submission.accepted, false);
+    assert.equal(submission.txHash, null);
+    assert.ok(
+      typeof submission.responseData === "string" &&
+      submission.responseData.includes("503"),
+      `responseData should include HTTP status, got: ${String(submission.responseData)}`,
+    );
+
+    // awaitFinality should produce a failed state
+    const finality = await adapter.awaitFinality(submission);
+    assert.equal(finality.state.flow.status, "failed");
+    if (finality.state.flow.status === "failed") {
+      assert.ok(finality.state.flow.reason.includes("503"));
     }
-    assert.equal(result.inferenceResult, null);
+    assert.equal(finality.state.inferenceResult, null);
   });
 
-  // --- fetchState: malformed 402 body ---
+  // --- readState: malformed 402 body ---
 
-  it("8. malformed 402 body — rejects with OpenLedgerAdapterError (caught by router)", async () => {
+  it("9. malformed 402 body — readState rejects with OpenLedgerAdapterError", async () => {
     for (const badBody of [null, {}, { accepts: [] }, { accepts: "not-an-array" }]) {
       const spy = spyFetch(makeResponse(402, badBody));
       globalThis.fetch = spy.fn;
 
       const adapter = new OpenLedgerAdapter(BASE_CONFIG);
       await assert.rejects(
-        () => adapter.fetchState({ path: "/infer", params: {} }),
+        () => adapter.readState({ path: "/infer", params: {} }),
         (err: unknown) => {
           assert.ok(err instanceof OpenLedgerAdapterError);
           assert.ok(err.message.includes("missing valid payment requirement"));

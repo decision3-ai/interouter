@@ -5,14 +5,20 @@
  */
 
 // Router
-export { InterouterRouter } from "./router.js";
+export { InterouterRouter, NotSupportedError } from "./router.js";
 export type {
   AdapterError,
   ChainAdapter,
+  FinalityStatus,
   InferenceProvider,
+  PaymentPayload,
+  PaymentRequirement,
+  ReadResult,
   RouteContext,
   RouteResult,
   RouterConfig,
+  SignedPayload,
+  SubmissionResult,
 } from "./router.js";
 
 // Built-in adapters
@@ -29,8 +35,8 @@ export type {
   OpenLedgerAdapterConfig,
   OpenLedgerState,
   PaymentFlowStage,
-  PaymentPayload,
-  PaymentRequirement,
   TransferAuthorization,
+  X402PaymentRequirement,
+  X402WirePayload,
 } from "./adapters/OpenLedgerAdapter.js";
 export { OpenLedgerAdapterError } from "./adapters/OpenLedgerAdapter.js";

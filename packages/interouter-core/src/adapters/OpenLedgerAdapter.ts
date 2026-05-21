@@ -1,7 +1,35 @@
+/**
+ * OpenLedger / DGrid inference adapter — x402 payment protocol.
+ *
+ * @custodial-mvp
+ *   Server currently holds the signing key via:
+ *     process.env.OPENLEDGER_PRIVATE_KEY
+ *   All EIP-712 signing happens server-side using viem's privateKeyToAccount.
+ *   The private key MUST be loaded from an environment variable — never hardcoded.
+ *   This is acceptable for an MVP but carries full custodial risk: if the
+ *   server is compromised, the signing key is exposed.
+ *
+ * @v2-migration
+ *   Future architecture migrates to:
+ *     NEAR-backed delegated session keys
+ *   The user's NEAR wallet issues a time-bounded, scope-limited session key
+ *   that the server can use for signing without holding the master key.
+ *   This eliminates server-side custodial risk entirely.
+ */
+
 import { keccak256, toHex } from "viem";
 import type { Address, Hash, Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import type { ChainAdapter, RouteContext } from "../router.js";
+import type {
+  ChainAdapter,
+  ReadResult,
+  PaymentRequirement,
+  PaymentPayload,
+  SignedPayload,
+  SubmissionResult,
+  FinalityStatus,
+  RouteContext,
+} from "../router.js";
 
 // ---------------------------------------------------------------------------
 // x402 protocol types
@@ -10,14 +38,9 @@ import type { ChainAdapter, RouteContext } from "../router.js";
 /**
  * Payment requirement returned in the HTTP 402 response body.
  * Mirrors the x402 spec as implemented by OpenLedger/DGrid.
+ * Extends the base PaymentRequirement with x402-specific fields.
  */
-export interface PaymentRequirement {
-  /** Payment scheme — "exact" means the full amount must be sent in one tx. */
-  scheme: "exact";
-  /** Chain network identifier, e.g. "bnb-testnet" or "openledger-l2". */
-  network: string;
-  /** Maximum payment amount in the token's smallest unit (string — avoids precision loss). */
-  maxAmountRequired: string;
+export interface X402PaymentRequirement extends PaymentRequirement {
   /** URL of the inference resource being paid for. Used to derive inferenceId. */
   resource: string;
   /** Human-readable description of the payment. */
@@ -58,11 +81,12 @@ export interface TransferAuthorization {
 
 /**
  * Encoded payment sent as the `X-PAYMENT` header on the retry request.
+ * Internal wire format for the x402 protocol — not part of the public lifecycle API.
  */
-export interface PaymentPayload {
+export interface X402WirePayload {
   x402Version: 1;
-  scheme: PaymentRequirement["scheme"];
-  network: PaymentRequirement["network"];
+  scheme: X402PaymentRequirement["scheme"];
+  network: X402PaymentRequirement["network"];
   payload: {
     signature: Hex;
     authorization: TransferAuthorization;
@@ -78,9 +102,9 @@ export interface PaymentPayload {
 
 export type PaymentFlowStage =
   | { status: "idle" }
-  | { status: "payment_required"; requirement: PaymentRequirement }
-  | { status: "signing"; requirement: PaymentRequirement; authorization: TransferAuthorization }
-  | { status: "submitting"; requirement: PaymentRequirement; payload: PaymentPayload }
+  | { status: "payment_required"; requirement: X402PaymentRequirement }
+  | { status: "signing"; requirement: X402PaymentRequirement; authorization: TransferAuthorization }
+  | { status: "submitting"; requirement: X402PaymentRequirement; payload: X402WirePayload }
   | { status: "complete"; txHash: Hash; amountPaid: string; tokenAddress: Address }
   | { status: "failed"; reason: string };
 
@@ -179,83 +203,175 @@ export class OpenLedgerAdapter implements ChainAdapter<OpenLedgerState> {
     this.account = privateKeyToAccount(privateKey);
   }
 
-  /**
-   * Runs the full x402 payment state machine:
-   *
-   *   1. Send inference request → may receive 402.
-   *   2. Parse PaymentRequirement from the 402 body.
-   *   3. Build TransferAuthorization and sign via EIP-712.
-   *   4. Encode PaymentPayload and retry with X-PAYMENT header.
-   *   5. Return inference result + payment receipt.
-   *
-   * Signing errors are caught and returned as a `failed` flow stage — this
-   * method never throws.
-   */
-  async fetchState(context: RouteContext): Promise<OpenLedgerState> {
-    // Stage 1 — initial inference request.
-    const initialResponse = await this.makeInferenceRequest(context, null);
+  // ---------------------------------------------------------------------------
+  // Lifecycle: readState
+  // ---------------------------------------------------------------------------
 
-    if (initialResponse.status !== 402) {
-      const result: unknown = await initialResponse.json();
-      return this.buildFreeResult(result);
+  /**
+   * Sends the initial inference request.
+   *
+   * - HTTP 200 → returns the inference result with no payment required.
+   * - HTTP 402 → parses the x402 PaymentRequirement and signals it to the router.
+   *
+   * No signing or payment occurs here — this is a pure read operation.
+   */
+  async readState(context: RouteContext): Promise<ReadResult<OpenLedgerState>> {
+    const response = await this.makeInferenceRequest(context, null);
+
+    if (response.status !== 402) {
+      const result: unknown = await response.json();
+      return {
+        state: this.buildFreeResult(result),
+        paymentRequired: null,
+      };
     }
 
-    // Stage 2 — parse payment requirement from 402 body.
-    const requirement = await this.parsePaymentRequirement(initialResponse);
-
-    // Stage 3 — build authorization and sign. Signing errors → failed stage.
-    const authorization = this.buildAuthorization(requirement);
-    let signature: Hex;
-    try {
-      signature = await this.signAuthorization(authorization, requirement);
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      return {
+    const requirement = await this.parsePaymentRequirement(response);
+    return {
+      state: {
         inferenceResult: null,
         paymentTxHash: null,
         amountPaid: "0",
         tokenAddress: requirement.asset,
-        flow: { status: "failed", reason },
-      };
-    }
+        flow: { status: "payment_required", requirement },
+      },
+      paymentRequired: requirement,
+    };
+  }
 
-    // Stage 4 — encode payload and retry with X-PAYMENT header.
-    const payload: PaymentPayload = {
+  // ---------------------------------------------------------------------------
+  // Lifecycle: preparePayment
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Builds an unsigned TransferAuthorization from the x402 payment requirement.
+   *
+   * Determines: from address, recipient, amount, nonce, inferenceId, validity window.
+   * Does NOT sign — the authorization is returned as part of the PaymentPayload
+   * for explicit signing in the next stage.
+   */
+  async preparePayment(requirement: PaymentRequirement): Promise<PaymentPayload> {
+    const x402Req = requirement as X402PaymentRequirement;
+    const authorization = this.buildAuthorization(x402Req);
+    const result = { requirement, authorization };
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle: sign
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Signs the prepared TransferAuthorization using EIP-712 typed data.
+   *
+   * Signing key: this.account (derived from OPENLEDGER_PRIVATE_KEY).
+   * Domain: { name: "DGrid Inference Payment", version: "1", chainId, verifyingContract: asset }.
+   * Type: InferencePayment — see DGRID_EIP712_TYPES.
+   *
+   * Signing is fully offline — no RPC call needed.
+   * Throws on signing failure (e.g. domain separator mismatch).
+   */
+  async sign(payload: PaymentPayload): Promise<SignedPayload> {
+    const olPayload = payload as PaymentPayload & { authorization: TransferAuthorization };
+    const x402Req = payload.requirement as X402PaymentRequirement;
+
+    const signature = await this.signAuthorization(olPayload.authorization, x402Req);
+    return { payload, signature };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle: submit
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Encodes the signed authorization as an x402 X-PAYMENT header and retries
+   * the inference request.
+   *
+   * On success (HTTP 2xx): returns accepted=true with the inference response.
+   * On failure: returns accepted=false with the error reason.
+   */
+  async submit(signed: SignedPayload, context: RouteContext): Promise<SubmissionResult> {
+    const olPayload = signed.payload as PaymentPayload & { authorization: TransferAuthorization };
+    const x402Req = signed.payload.requirement as X402PaymentRequirement;
+
+    const wirePayload: X402WirePayload = {
       x402Version: 1,
-      scheme: requirement.scheme,
-      network: requirement.network,
-      payload: { signature, authorization },
+      scheme: x402Req.scheme,
+      network: x402Req.network,
+      payload: {
+        signature: signed.signature as Hex,
+        authorization: olPayload.authorization,
+      },
     };
 
-    const paidResponse = await this.makeInferenceRequest(context, payload);
+    const paidResponse = await this.makeInferenceRequest(context, wirePayload);
 
     if (!paidResponse.ok) {
       return {
-        inferenceResult: null,
-        paymentTxHash: null,
-        amountPaid: "0",
-        tokenAddress: requirement.asset,
-        flow: {
-          status: "failed",
-          reason: `Inference request failed after payment: HTTP ${paidResponse.status}`,
-        },
+        accepted: false,
+        txHash: null,
+        requirement: signed.payload.requirement,
+        responseData: `Inference request failed after payment: HTTP ${paidResponse.status}`,
       };
     }
 
-    // Stage 5 — return inference result + payment receipt.
     const inferenceResult: unknown = await paidResponse.json();
     const txHash = (paidResponse.headers.get("X-PAYMENT-TX-HASH") ?? "0x0") as Hash;
 
     return {
-      inferenceResult,
-      paymentTxHash: txHash,
-      amountPaid: requirement.maxAmountRequired,
-      tokenAddress: requirement.asset,
-      flow: {
-        status: "complete",
-        txHash,
-        amountPaid: requirement.maxAmountRequired,
-        tokenAddress: requirement.asset,
+      accepted: true,
+      txHash,
+      requirement: signed.payload.requirement,
+      responseData: inferenceResult,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle: awaitFinality
+  // ---------------------------------------------------------------------------
+
+  /**
+   * x402 payments are verified atomically on submission — the server validates
+   * the EIP-712 signature and settles inline. No separate finality wait.
+   *
+   * Builds the final OpenLedgerState from the submission result.
+   */
+  async awaitFinality(result: SubmissionResult): Promise<FinalityStatus<OpenLedgerState>> {
+    const x402Req = result.requirement as X402PaymentRequirement;
+
+    if (result.accepted) {
+      return {
+        finalized: true,
+        txHash: result.txHash,
+        state: {
+          inferenceResult: result.responseData,
+          paymentTxHash: result.txHash as Hash,
+          amountPaid: x402Req.maxAmountRequired,
+          tokenAddress: x402Req.asset,
+          flow: {
+            status: "complete",
+            txHash: result.txHash as Hash,
+            amountPaid: x402Req.maxAmountRequired,
+            tokenAddress: x402Req.asset,
+          },
+        },
+      };
+    }
+
+    return {
+      finalized: true,
+      txHash: null,
+      state: {
+        inferenceResult: null,
+        paymentTxHash: null,
+        amountPaid: "0",
+        tokenAddress: x402Req.asset,
+        flow: {
+          status: "failed",
+          reason: typeof result.responseData === "string"
+            ? result.responseData
+            : "Payment submission failed",
+        },
       },
     };
   }
@@ -266,7 +382,7 @@ export class OpenLedgerAdapter implements ChainAdapter<OpenLedgerState> {
 
   private makeInferenceRequest(
     context: RouteContext,
-    payment: PaymentPayload | null,
+    payment: X402WirePayload | null,
   ): Promise<Response> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -285,7 +401,7 @@ export class OpenLedgerAdapter implements ChainAdapter<OpenLedgerState> {
     });
   }
 
-  private async parsePaymentRequirement(response: Response): Promise<PaymentRequirement> {
+  private async parsePaymentRequirement(response: Response): Promise<X402PaymentRequirement> {
     const body: unknown = await response.json();
     if (
       typeof body !== "object" ||
@@ -296,10 +412,10 @@ export class OpenLedgerAdapter implements ChainAdapter<OpenLedgerState> {
     ) {
       throw new OpenLedgerAdapterError("402 response body missing valid payment requirement");
     }
-    return (body as { accepts: PaymentRequirement[] }).accepts[0] as PaymentRequirement;
+    return (body as { accepts: X402PaymentRequirement[] }).accepts[0] as X402PaymentRequirement;
   }
 
-  private buildAuthorization(requirement: PaymentRequirement): TransferAuthorization {
+  private buildAuthorization(requirement: X402PaymentRequirement): TransferAuthorization {
     const nowSec = BigInt(Math.floor(Date.now() / 1000));
     return {
       from: this.config.signerAddress,
@@ -325,7 +441,7 @@ export class OpenLedgerAdapter implements ChainAdapter<OpenLedgerState> {
    */
   private async signAuthorization(
     authorization: TransferAuthorization,
-    requirement: PaymentRequirement,
+    requirement: X402PaymentRequirement,
   ): Promise<Hex> {
     const domain = {
       name: DGRID_PAYMENT_DOMAIN_NAME,

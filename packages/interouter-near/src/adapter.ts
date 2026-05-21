@@ -1,4 +1,14 @@
-import type { ChainAdapter, RouteContext } from "@decision3/interouter-core";
+import type {
+  ChainAdapter,
+  ReadResult,
+  PaymentRequirement,
+  PaymentPayload,
+  SignedPayload,
+  SubmissionResult,
+  FinalityStatus,
+  RouteContext,
+} from "@decision3/interouter-core";
+import { NotSupportedError } from "@decision3/interouter-core";
 import type { NearAdapterConfig, NearState } from "./types.js";
 import { NearAdapterError } from "./types.js";
 import { fetchAccountData, fetchViewCalls } from "./rpc.js";
@@ -11,7 +21,7 @@ export class NearAdapter implements ChainAdapter<NearState> {
     this.config = config;
   }
 
-  async fetchState(context: RouteContext): Promise<NearState> {
+  async readState(context: RouteContext): Promise<ReadResult<NearState>> {
     const accountId = this.config.accountId ?? context.walletAddress;
     if (accountId === undefined || accountId === "") {
       throw new NearAdapterError(
@@ -28,11 +38,30 @@ export class NearAdapter implements ChainAdapter<NearState> {
     ]);
 
     return {
-      accountId,
-      balance: accountData.balance,
-      storageUsage: accountData.storageUsage,
-      codeHash: accountData.codeHash,
-      viewResults,
+      state: {
+        accountId,
+        balance: accountData.balance,
+        storageUsage: accountData.storageUsage,
+        codeHash: accountData.codeHash,
+        viewResults,
+      },
+      paymentRequired: null,
     };
+  }
+
+  async preparePayment(_requirement: PaymentRequirement): Promise<PaymentPayload> {
+    throw new NotSupportedError(this.id, "preparePayment");
+  }
+
+  async sign(_payload: PaymentPayload): Promise<SignedPayload> {
+    throw new NotSupportedError(this.id, "sign");
+  }
+
+  async submit(_signed: SignedPayload, _context: RouteContext): Promise<SubmissionResult> {
+    throw new NotSupportedError(this.id, "submit");
+  }
+
+  async awaitFinality(_result: SubmissionResult): Promise<FinalityStatus<NearState>> {
+    throw new NotSupportedError(this.id, "awaitFinality");
   }
 }
