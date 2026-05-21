@@ -336,7 +336,7 @@ Before introducing ANY architectural change, answer these 6 questions:
 - [x] ARCHITECTURE.md committed
 - [x] CLAUDE.md committed
 - [x] Repo pushed to GitHub
-- [ ] tsconfig.json excludes test files from dist/
+- [x] tsconfig.json excludes test files from dist/
 - [ ] npm publish @decision3/interouter-core
 - [ ] DGrid confirmation on 3 open blockers
 - [ ] Frontend integration (Next.js)
