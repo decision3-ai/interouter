@@ -1,6 +1,6 @@
 {
   "name": "@decision3/interouter-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Core middleware that aggregates on-chain state and AI inference into a single optimized JSON for Next.js frontends.",
   "license": "MIT",
   "author": "Decision3",
@@ -14,7 +14,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc --project tsconfig.json",

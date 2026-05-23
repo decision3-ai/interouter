@@ -1,85 +1,96 @@
 # @decision3/interouter-core
 
-Interouter is a Node.js middleware layer that sits between a Next.js SSR frontend and blockchain networks (NEAR, Sui, Walrus). It aggregates on-chain state, enriches it with optional AI inference results, and delivers a single optimized JSON payload to the frontend — in milliseconds.
+> AI Resource Payment Router. Open-source middleware for AI-native applications.
+
+[![npm version](https://img.shields.io/npm/v/@decision3/interouter-core.svg)](https://www.npmjs.com/package/@decision3/interouter-core)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+**Status:** Pre-alpha. API may change.
 
 ---
 
-## Vision
+## What is Interouter?
 
-Modern dApps have a latency problem. The frontend has to juggle multiple async calls: one to NEAR for account state, one to Sui for object data, one to Walrus for blob metadata, and one to an AI model for personalized recommendations. Each call has its own error surface, retry logic, and caching concern.
+Interouter sits between Next.js SSR runtimes, blockchain networks, and AI inference systems.
 
-Interouter collapses this complexity into a single `router.resolve(context)` call. The router fans out to all registered chain adapters in parallel, optionally passes the aggregated result to an AI provider, and returns one `RouteResult` object that the Next.js page component can consume directly from `getServerSideProps` or a Route Handler.
+A single deterministic API that:
+- Reads multi-chain state in parallel (NEAR + EVM L2)
+- Orchestrates `402 Payment Required` (x402 standard) flows
+- Executes payment retries automatically
+- Hides blockchain complexity from frontend applications
+
+**Positioning:** AI Resource Payment Router. Not a blockchain SDK, not an RPC wrapper.
+
+Built on the [x402 standard](https://github.com/coinbase/x402) — now under the Linux Foundation, supported by Coinbase, Google, AWS, Stripe, Visa, and Cloudflare.
 
 ---
 
-## Architecture
+## Install
 
+```bash
+npm install @decision3/interouter-core
 ```
-Next.js SSR / Route Handler
-        |
-        v
- InterouterRouter.resolve(context)
-        |
-   ┌────┴─────────────────────┐
-   |  parallel fetchState()   |
-   |  ┌────────┐ ┌────────┐   |
-   |  │  NEAR  │ │  Sui   │   |
-   |  │adapter │ │adapter │   |
-   |  └────────┘ └────────┘   |
-   |      ┌──────────┐        |
-   |      │  Walrus  │        |
-   |      │ adapter  │        |
-   |      └──────────┘        |
-   └──────────────────────────┘
-        |
-        v
-   InferenceProvider (optional)
-        |
-        v
-     RouteResult → JSON → Frontend
-```
-
----
 
 ## Quick Start
 
-```ts
-import { InterouterRouter } from "@decision3/interouter-core";
+```typescript
+import { InterouterRouter, NearAdapter, OpenLedgerAdapter } from "@decision3/interouter-core";
 
 const router = new InterouterRouter({
   adapters: [
-    nearAdapter,  // @decision3/interouter-near (coming soon)
-    suiAdapter,   // @decision3/interouter-sui  (coming soon)
+    new NearAdapter({ rpcUrl: "https://rpc.mainnet.near.org" }),
+    new OpenLedgerAdapter({
+      chainId: 1234,
+      privateKey: process.env.OPENLEDGER_PRIVATE_KEY,
+      resourceUrl: "https://api.example.com/inference",
+    }),
   ],
-  aiProvider: myInferenceProvider, // optional
-  adapterTimeoutMs: 3000,
 });
 
-// Inside getServerSideProps or a Next.js Route Handler:
-const result = await router.resolve({
-  path: "/dashboard",
-  walletAddress: "alice.near",
-  params: {},
-});
+const result = await router.resolve({ walletAddress: "victor.near" });
 
-// result.chainState   — merged on-chain data keyed by adapter id
-// result.inference    — AI output (or null)
-// result.resolvedInMs — total latency
+console.log(result.chainState.near);
+console.log(result.chainState.openledger);
 ```
 
----
+## Architecture
 
-## Packages
+Every adapter implements a strict 5-stage lifecycle:
 
-| Package | Status | Description |
-|---|---|---|
-| `@decision3/interouter-core` | Active | Core router, interfaces, types |
-| `@decision3/interouter-near` | Planned | NEAR Protocol chain adapter |
-| `@decision3/interouter-sui`  | Planned | Sui chain adapter |
-| `@decision3/interouter-walrus` | Planned | Walrus blob storage adapter |
+```typescript
+interface ChainAdapter {
+  readState(): Promise<ChainState>
+  preparePayment(requirement: PaymentRequirement): Promise<PaymentPayload>
+  sign(payload: PaymentPayload): Promise<SignedPayload>
+  submit(signed: SignedPayload): Promise<SubmissionResult>
+  awaitFinality(result: SubmissionResult): Promise<FinalityStatus>
+}
+```
 
----
+Signing is always explicit — never hidden inside read operations.
+
+For full architectural details, security model, and open blockers: see [ARCHITECTURE.md](https://github.com/EvoAgend/interouter/blob/master/ARCHITECTURE.md).
+
+## Roadmap
+
+**Current (v0.1.x):**
+- 5-stage ChainAdapter lifecycle (done)
+- NearAdapter read-only (done)
+- OpenLedgerAdapter x402 `exact` scheme (done)
+- Custodial MVP signing model (done)
+
+**Next:**
+- `upto` scheme implementation for consumption-based AI inference billing — first middleware to implement this scheme from the x402 specification
+- Circuit breaker for budget enforcement
+- NEAR session keys (delegated, scoped signing)
+- Edge runtime support (Cloudflare Workers, Vercel Edge)
 
 ## License
 
-MIT — Decision3
+MIT © Decision3
+
+## Links
+
+- GitHub: https://github.com/EvoAgend/interouter
+- x402 standard: https://github.com/coinbase/x402
+- x402 Foundation: https://x402.org
