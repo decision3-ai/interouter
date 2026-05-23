@@ -237,6 +237,8 @@ These are implemented on assumptions. **Do NOT ship to production until DGrid co
 | 1 | BigInt in `X-PAYMENT` header | Decimal strings (`"1000000"`) via base64 encoding | Decimal strings accepted, or hex `0x...` required? |
 | 2 | `verifyingContract` in EIP-712 domain | ERC-20 token address (`requirement.asset`) | Token contract, or separate payment gateway? |
 | 3 | Inference ID generation | Deterministic `keccak256` of resource URL | Deterministic hash, or random per-request Task UUID? |
+| 4 | x402 header version | Code uses v1 `X-PAYMENT` header | Does OpenLedger support v1 (`X-PAYMENT`), v2 (`PAYMENT-SIGNATURE`), or both? Per official spec at github.com/coinbase/x402, v2 is the current standard. |
+| 5 | `upto` scheme escrow mechanics | Not yet implemented — current code uses `exact` scheme only | Does OpenLedger's payment contract support temporary fund locking (escrow) based on `upto` limit, with provider drawing actual cost and remainder auto-released? |
 
 ---
 
@@ -338,10 +340,13 @@ Before introducing ANY architectural change, answer these 6 questions:
 - [x] Repo pushed to GitHub
 - [x] tsconfig.json excludes test files from dist/
 - [x] npm publish @decision3/interouter-core
-- [ ] DGrid confirmation on 3 open blockers
+- [ ] DGrid confirmation on 5 open blockers
 - [ ] Frontend integration (Next.js)
 - [ ] Latency benchmark with numbers
 - [ ] V2 Session Keys migration
+- [ ] Implement circuit breaker for `upto` budget enforcement in router.ts
+- [ ] Draft `upto` scheme specification for x402 Foundation
+- [ ] Reference implementation of `upto` in OpenLedgerAdapter
 
 ---
 
@@ -360,4 +365,45 @@ The architecture evolves toward: session-key authorization, distributed executio
 
 ---
 
-*Engine document. Updated as the project evolves. Last revision: refactor to 5-stage ChainAdapter lifecycle.*
+### Strategic Priority — `upto` Scheme Pioneer
+
+The official x402 specification defines two payment schemes:
+- `exact` — pay a fixed amount (currently the only implemented scheme in production)
+- `upto` — pay based on actual consumption up to a budget limit (e.g., per LLM token) — **theoretical, not yet implemented anywhere**
+
+**Why this matters:**
+AI compute is fundamentally unpredictable. Unlike buying a file or sending tokens (fixed price), LLM output cannot be priced until streaming completes. A user or AI agent must authorize a budget ceiling ("up to $0.05"), and the system must settle in milliseconds without re-prompting.
+
+**Interouter aims to be the first middleware to implement the `upto` scheme** for AI inference billing — making Decision3 a direct contributor to the x402 Foundation standard, not a downstream consumer.
+
+### Two-Phase Implementation
+
+**Phase 1 — `@custodial-mvp`:**
+- `OpenLedgerAdapter.preparePayment()` signs payload with `upto` maximum amount per Inference Task ID
+- Provider draws actual cost post-inference; remainder auto-released by smart contract
+- Depends on: DGrid escrow contract support (Open Blocker #5)
+
+**Phase 2 — `@v2-migration`:**
+- User delegates NEAR session key with strict per-query AND per-session limits
+- Example scope: "max $0.01 per query, max $2.00 per session"
+- Result: AI agents can execute hundreds of inferences autonomously within a pre-authorized economic boundary, with zero risk of wallet drainage
+
+### Mandatory Safety Mechanism
+
+`router.ts` MUST implement a circuit breaker:
+- If provider attempts to charge more than the `upto` value defined in `preparePayment()`, the pipeline halts immediately
+- Throws an explicit `BudgetExceededError`
+- No silent fallback, no partial settlement
+
+### Contribution Path
+
+1. Validate `exact` scheme with OpenLedger (resolve Open Blockers #1–4)
+2. Draft `upto` scheme specification document
+3. Build reference implementation in `OpenLedgerAdapter`
+4. Submit as canonical implementation to github.com/coinbase/x402
+
+This is the difference between "building on a standard" and "shaping a standard."
+
+---
+
+*Engine document. Updated as the project evolves. Last revision: add upto scheme strategic roadmap and x402 v2 header blocker.*
