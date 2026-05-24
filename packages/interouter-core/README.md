@@ -16,12 +16,14 @@ Interouter sits between Next.js SSR runtimes, blockchain networks, and AI infere
 A single deterministic API that:
 - Reads multi-chain state in parallel (NEAR + EVM L2)
 - Orchestrates `402 Payment Required` (x402 standard) flows
+- Handles runtime compatibility across diverging x402 facilitator implementations (CDP, foundation reference, self-hosted)
+- Prevents fund loss caused by wire-shape divergences between implementations
 - Executes payment retries automatically
 - Hides blockchain complexity from frontend applications
 
-**Positioning:** AI Resource Payment Router. Not a blockchain SDK, not an RPC wrapper.
+**Positioning:** The first facilitator-agnostic middleware for x402. Not a blockchain SDK, not an RPC wrapper.
 
-Built on the [x402 standard](https://github.com/coinbase/x402) — now under the Linux Foundation, supported by Coinbase, Google, AWS, Stripe, Visa, and Cloudflare.
+Built on the [x402 standard](https://github.com/x402-foundation/x402) — under the Linux Foundation, supported by Coinbase, Google, AWS, Stripe, Visa, and Cloudflare.
 
 ---
 
@@ -80,7 +82,8 @@ For full architectural details, security model, and open blockers: see [ARCHITEC
 - Custodial MVP signing model (done)
 
 **Next:**
-- `upto` scheme implementation for consumption-based AI inference billing — first middleware to implement this scheme from the x402 specification
+- Map wire-shape divergences across CDP, foundation, and self-hosted facilitators
+- Implement `upto` scheme with cross-facilitator compatibility (reference: x402-foundation/x402#2437)
 - Circuit breaker for budget enforcement
 - NEAR session keys (delegated, scoped signing)
 - Edge runtime support (Cloudflare Workers, Vercel Edge)

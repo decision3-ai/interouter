@@ -3,6 +3,8 @@
 **Document Status:** Internal Alpha / Active Refactor Validation
 **Target Audience:** Decision3 Core Engineers & Integration Partners
 
+**Strategic Positioning:** Facilitator-agnostic middleware for x402 — handling runtime compatibility across diverging implementations (CDP, foundation reference, self-hosted) and preventing fund loss caused by wire-shape divergences. See STRATEGIC_FAQ.md for the full defensibility reasoning.
+
 ---
 
 ## 1. ChainAdapter Lifecycle (5-Stage)
@@ -49,6 +51,8 @@ Result: Full backend compromise limits damage to the active session budget only.
 ---
 
 ## 3. Open Questions & Blockers (DGrid / OpenLedger)
+
+These open blockers exist within a broader context: the x402 ecosystem is fragmenting across multiple facilitator implementations. The Linux Foundation reference implementation, Coinbase's CDP-hosted facilitator, and various self-hosted facilitators (dexter.cash, Faremeter) handle the same wire shapes differently. Issue x402-foundation/x402#2437 documents one concrete divergence: CDP rejects `setSettlementOverrides` payloads that the foundation reference accepts cleanly. Interouter's role is to abstract these divergences so sellers do not lose money on facilitator-specific edge cases.
 
 These are implemented on assumptions and must be confirmed with DGrid before any production testing:
 
