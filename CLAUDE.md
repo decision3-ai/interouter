@@ -365,16 +365,21 @@ The architecture evolves toward: session-key authorization, distributed executio
 
 ---
 
-### Strategic Priority — `upto` Scheme Pioneer
+### Strategic Priority — `upto` Scheme Facilitator-Agnostic Middleware
 
 The official x402 specification defines two payment schemes:
-- `exact` — pay a fixed amount (currently the only implemented scheme in production)
-- `upto` — pay based on actual consumption up to a budget limit (e.g., per LLM token) — **theoretical, not yet implemented anywhere**
+- `exact` — pay a fixed amount (currently the only widely deployed scheme)
+- `upto` — pay based on actual consumption up to a budget limit (e.g., per LLM token)
 
-**Why this matters:**
-AI compute is fundamentally unpredictable. Unlike buying a file or sending tokens (fixed price), LLM output cannot be priced until streaming completes. A user or AI agent must authorize a budget ceiling ("up to $0.05"), and the system must settle in milliseconds without re-prompting.
+The `upto` scheme is specified in the x402 foundation reference (`specs/schemes/upto/scheme_upto_evm.md`). However, **the ecosystem is fragmented**: divergences exist between the foundation reference implementation, the Coinbase CDP hosted facilitator, and self-hosted facilitators (dexter.cash, Faremeter). The CDP ↔ foundation divergence is a documented production-impacting bug (x402-foundation/x402#2437).
 
-**Interouter aims to be the first middleware to implement the `upto` scheme** for AI inference billing — making Decision3 a direct contributor to the x402 Foundation standard, not a downstream consumer.
+**Why this fragmentation matters:**
+Sellers integrating `upto` today must choose a facilitator and hardcode assumptions about its wire shape. A facilitator incompatibility silently costs sellers money — payments rejected or mis-settled with no clear error.
+
+**Interouter's opportunity: be the first production middleware that abstracts across facilitator implementations**, normalizing wire-shape divergences automatically so sellers remain compatible with all facilitators without code changes.
+
+**Why AI inference makes this urgent:**
+AI compute is fundamentally unpredictable. Unlike buying a file or sending tokens (fixed price), LLM output cannot be priced until streaming completes. A user or AI agent must authorize a budget ceiling ("up to $0.05"), and the system must settle in milliseconds without re-prompting — across whichever facilitator the seller happens to use.
 
 ### Two-Phase Implementation
 
@@ -398,12 +403,12 @@ AI compute is fundamentally unpredictable. Unlike buying a file or sending token
 ### Contribution Path
 
 1. Validate `exact` scheme with OpenLedger (resolve Open Blockers #1–4)
-2. Draft `upto` scheme specification document
-3. Build reference implementation in `OpenLedgerAdapter`
-4. Submit as canonical implementation to github.com/coinbase/x402
+2. Map facilitator wire-shape divergences (CDP vs. foundation vs. self-hosted)
+3. Build facilitator-agnostic normalization layer in `OpenLedgerAdapter`
+4. Contribute findings upstream to x402-foundation/x402
 
-This is the difference between "building on a standard" and "shaping a standard."
+This is the difference between "consuming a fragmented standard" and "being the layer that makes it work."
 
 ---
 
-*Engine document. Updated as the project evolves. Last revision: add upto scheme strategic roadmap and x402 v2 header blocker.*
+*Engine document. Updated as the project evolves. Last revision: reposition upto strategy — facilitator-agnostic middleware, not scheme author.*
