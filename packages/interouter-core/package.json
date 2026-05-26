@@ -1,9 +1,31 @@
 {
   "name": "@decision3/interouter-core",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Core middleware that aggregates on-chain state and AI inference into a single optimized JSON for Next.js frontends.",
   "license": "MIT",
   "author": "Decision3",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/decision3-ai/interouter.git"
+  },
+  "homepage": "https://decision3.ai",
+  "bugs": {
+    "url": "https://github.com/decision3-ai/interouter/issues"
+  },
+  "keywords": [
+    "x402",
+    "ai-agents",
+    "ai-inference",
+    "middleware",
+    "blockchain",
+    "near",
+    "evm",
+    "openledger",
+    "payment",
+    "decentralized",
+    "facilitator",
+    "web3"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

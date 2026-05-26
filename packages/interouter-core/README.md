@@ -71,7 +71,7 @@ interface ChainAdapter {
 
 Signing is always explicit — never hidden inside read operations.
 
-For full architectural details, security model, and open blockers: see [ARCHITECTURE.md](https://github.com/EvoAgend/interouter/blob/master/ARCHITECTURE.md).
+For full architectural details, security model, and open blockers: see [ARCHITECTURE.md](https://github.com/decision3-ai/interouter/blob/master/ARCHITECTURE.md).
 
 ## Roadmap
 
@@ -94,6 +94,6 @@ MIT © Decision3
 
 ## Links
 
-- GitHub: https://github.com/EvoAgend/interouter
+- GitHub: https://github.com/decision3-ai/interouter
 - x402 standard: https://github.com/coinbase/x402
 - x402 Foundation: https://x402.org
