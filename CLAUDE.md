@@ -20,7 +20,7 @@ Sits between Next.js SSR runtimes, blockchain networks, and AI inference/payment
 **Positioning:** AI Resource Payment Router. Not a blockchain SDK, not an RPC wrapper.
 **Long-term vision:** "Stripe for AI agent payments" / "Axios for paid AI inference over blockchain."
 
-**Repo:** https://github.com/EvoAgend/interouter
+**Repo:** https://github.com/decision3-ai/interouter
 **npm scope:** `@decision3/interouter-core`
 
 ---
