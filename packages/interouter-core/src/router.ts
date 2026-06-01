@@ -65,6 +65,12 @@ export interface SubmissionResult {
   requirement: PaymentRequirement;
   /** Response body from the submission endpoint (e.g. inference result). */
   responseData: unknown;
+  /**
+   * Actual amount charged by the provider, in the token's smallest unit.
+   * Populated by adapters that support the `upto` scheme.
+   * Absent for `exact` scheme — charge is always maxAmountRequired.
+   */
+  actualCharge?: string;
 }
 
 /** Finality confirmation + final adapter state after payment lifecycle. */
@@ -83,6 +89,20 @@ export class NotSupportedError extends Error {
   constructor(adapterId: string, method: string) {
     super(`${adapterId}: ${method}() is not supported — adapter is read-only`);
     this.name = "NotSupportedError";
+  }
+}
+
+/**
+ * Thrown when a provider reports an actual charge exceeding the authorized ceiling.
+ * Halts the pipeline immediately — no silent overspend, no partial settlement.
+ * Only fires when SubmissionResult.actualCharge is populated (upto scheme adapters).
+ */
+export class BudgetExceededError extends Error {
+  constructor(adapterId: string, actual: string, authorized: string) {
+    super(
+      `${adapterId}: provider charged ${actual} but authorized maximum was ${authorized}`,
+    );
+    this.name = "BudgetExceededError";
   }
 }
 
@@ -253,6 +273,20 @@ export class InterouterRouter {
     const payload = await adapter.preparePayment(paymentRequired);
     const signed = await adapter.sign(payload);
     const submission = await adapter.submit(signed, context);
+
+    // Circuit breaker: if the provider reported an actual charge exceeding the
+    // authorized ceiling, halt immediately. No silent overspend, no partial settlement.
+    if (
+      submission.actualCharge !== undefined &&
+      BigInt(submission.actualCharge) > BigInt(paymentRequired.maxAmountRequired)
+    ) {
+      throw new BudgetExceededError(
+        adapter.id,
+        submission.actualCharge,
+        paymentRequired.maxAmountRequired,
+      );
+    }
+
     const finality = await adapter.awaitFinality(submission);
     return finality.state;
   }

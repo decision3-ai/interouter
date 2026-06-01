@@ -5,7 +5,7 @@
  */
 
 // Router
-export { InterouterRouter, NotSupportedError } from "./router.js";
+export { InterouterRouter, NotSupportedError, BudgetExceededError } from "./router.js";
 export type {
   AdapterError,
   ChainAdapter,

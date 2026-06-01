@@ -344,7 +344,7 @@ Before introducing ANY architectural change, answer these 6 questions:
 - [ ] Frontend integration (Next.js)
 - [ ] Latency benchmark with numbers
 - [ ] V2 Session Keys migration
-- [ ] Implement circuit breaker for `upto` budget enforcement in router.ts
+- [x] Implement circuit breaker for `upto` budget enforcement in router.ts
 - [ ] Draft `upto` scheme specification for x402 Foundation
 - [ ] Reference implementation of `upto` in OpenLedgerAdapter
 
