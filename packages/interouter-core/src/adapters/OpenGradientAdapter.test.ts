@@ -14,27 +14,26 @@ import type {
 const TEST_PRIVATE_KEY =
   "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" as const;
 const TEST_SIGNER    = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as const;
-const TEST_RECIPIENT = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" as const;
-const TEST_ASSET     = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC" as const; // mock $OPG address
+const TEST_RECIPIENT = "0x339c7de83d1a62edafbaac186382ee76584d294f" as const; // real OpenGradient payTo
+const TEST_ASSET     = "0x240b09731D96979f50B2C649C9CE10FcF9C7987F" as const; // real $OPG testnet
 
 const BASE_CONFIG: OpenGradientAdapterConfig = {
-  inferenceEndpoint: "https://api.opengradient.test/v1/inference", // TODO: real endpoint
-  chainId: 8453, // Base mainnet
-  rpcUrl: "https://mainnet.base.org",
+  inferenceEndpoint: "https://llm.opengradient.ai",
+  chainId: 84532, // Base Sepolia testnet
+  rpcUrl: "https://sepolia.base.org",
   signerAddress: TEST_SIGNER,
   privateKey: TEST_PRIVATE_KEY,
 };
 
 const SAMPLE_REQUIREMENT: OpenGradientPaymentRequirement = {
   scheme: "exact",
-  network: "base-mainnet",
+  network: "eip155:84532",
   maxAmountRequired: "1000000",
-  resource: "https://api.opengradient.test/v1/inference/task-abc",
-  description: "OpenGradient LLM inference",
-  mimeType: "application/json",
+  resource: "https://llm.opengradient.ai/v1/chat/completions",
   payTo: TEST_RECIPIENT,
   maxTimeoutSeconds: 300,
   asset: TEST_ASSET,
+  extra: { name: "OPG", version: "1" },
 };
 
 // ---------------------------------------------------------------------------
@@ -131,7 +130,7 @@ describe("OpenGradientAdapter", () => {
   // --- readState: 402 surfaces payment requirement ---
 
   it("5. readState on 402 — surfaces payment requirement, no signing occurs", async () => {
-    const spy = spyFetch(makeResponse(402, { accepts: [SAMPLE_REQUIREMENT] }));
+    const spy = spyFetch(makeResponse(402, SAMPLE_REQUIREMENT));
     globalThis.fetch = spy.fn;
 
     const adapter = new OpenGradientAdapter(BASE_CONFIG);
@@ -140,7 +139,7 @@ describe("OpenGradientAdapter", () => {
     assert.equal(spy.calls.length, 1, "readState should only make the initial request");
     assert.ok(paymentRequired !== null, "paymentRequired should be set");
     assert.equal(paymentRequired.scheme, "exact");
-    assert.equal(paymentRequired.network, "base-mainnet");
+    assert.equal(paymentRequired.network, "eip155:84532");
     assert.equal(paymentRequired.maxAmountRequired, "1000000");
     assert.equal(state.inferenceResult, null);
     assert.equal(state.flow.status, "payment_required");
@@ -148,12 +147,12 @@ describe("OpenGradientAdapter", () => {
 
   // --- Full lifecycle ---
 
-  it("6. full Permit2 lifecycle — preparePayment + sign + submit + awaitFinality produces complete state", async () => {
+  it("6. full EIP-3009 lifecycle — preparePayment + sign + submit + awaitFinality produces complete state", async () => {
     const inferenceBody = { answer: "the meaning of life", model: "opengradient-v1" };
     const txHash = "0xdeadbeef00000000000000000000000000000000000000000000000000000001";
 
     const spy = spyFetch(
-      makeResponse(402, { accepts: [SAMPLE_REQUIREMENT] }),
+      makeResponse(402, SAMPLE_REQUIREMENT),
       makeResponse(200, inferenceBody, { "x-payment-tx-hash": txHash }),
     );
     globalThis.fetch = spy.fn;
@@ -169,7 +168,7 @@ describe("OpenGradientAdapter", () => {
     const payload = await adapter.preparePayment(paymentRequired);
     assert.ok(payload.requirement === paymentRequired);
 
-    // Step 3: sign — Permit2 EIP-712 produces a 65-byte hex signature
+    // Step 3: sign — EIP-3009 EIP-712 produces a 65-byte hex signature
     const signed = await adapter.sign(payload);
     assert.ok(
       signed.signature.startsWith("0x") && signed.signature.length === 132,
@@ -181,7 +180,7 @@ describe("OpenGradientAdapter", () => {
     assert.equal(submission.accepted, true);
     assert.equal(submission.txHash, txHash);
 
-    // Verify payment header was sent on the retry request.
+    // Verify X-PAYMENT header was sent on the retry request.
     assert.equal(spy.calls.length, 2, "should make initial request and paid retry");
     const secondRequest = spy.calls[1];
     assert.ok(secondRequest !== undefined);
@@ -192,10 +191,11 @@ describe("OpenGradientAdapter", () => {
     const decoded = JSON.parse(atob(paymentHeader)) as OpenGradientWirePayload;
     assert.equal(decoded.x402Version, 1);
     assert.equal(decoded.scheme, "exact");
-    assert.equal(decoded.network, "base-mainnet");
-    assert.equal(decoded.payload.permit.permitted.token, TEST_ASSET);
-    assert.equal(decoded.payload.permit.permitted.amount, "1000000");
-    assert.equal(decoded.payload.permit.spender, TEST_RECIPIENT);
+    assert.equal(decoded.network, "eip155:84532");
+    assert.equal(decoded.payload.authorization.from, TEST_SIGNER);
+    assert.equal(decoded.payload.authorization.to, TEST_RECIPIENT);
+    assert.equal(decoded.payload.authorization.value, "1000000");
+    assert.equal(decoded.payload.authorization.validAfter, "0");
 
     // Step 5: awaitFinality
     const finality = await adapter.awaitFinality(submission);
@@ -216,7 +216,7 @@ describe("OpenGradientAdapter", () => {
   // --- sign failure ---
 
   it("7. sign throws on signing failure — error is explicit, not hidden", async () => {
-    const spy = spyFetch(makeResponse(402, { accepts: [SAMPLE_REQUIREMENT] }));
+    const spy = spyFetch(makeResponse(402, SAMPLE_REQUIREMENT));
     globalThis.fetch = spy.fn;
 
     const adapter = new OpenGradientAdapter(BASE_CONFIG);
@@ -247,7 +247,7 @@ describe("OpenGradientAdapter", () => {
 
   it("8. submit returns accepted=false on post-payment non-200 response", async () => {
     const spy = spyFetch(
-      makeResponse(402, { accepts: [SAMPLE_REQUIREMENT] }),
+      makeResponse(402, SAMPLE_REQUIREMENT),
       makeResponse(503, { error: "service unavailable" }),
     );
     globalThis.fetch = spy.fn;
@@ -281,7 +281,12 @@ describe("OpenGradientAdapter", () => {
   // --- readState: malformed 402 body ---
 
   it("9. malformed 402 body — readState rejects with OpenGradientAdapterError", async () => {
-    for (const badBody of [null, {}, { accepts: [] }, { accepts: "not-an-array" }]) {
+    for (const badBody of [
+      null,
+      {},
+      { scheme: "exact" },                          // missing network, maxAmountRequired, etc.
+      { scheme: "exact", network: "eip155:84532" }, // missing maxAmountRequired, resource, payTo, asset
+    ]) {
       const spy = spyFetch(makeResponse(402, badBody));
       globalThis.fetch = spy.fn;
 
