@@ -4,7 +4,7 @@
  * Chain:   Base Sepolia testnet (chainId: 84532)
  * Token:   $OPG — testnet: 0x240b09731D96979f50B2C649C9CE10FcF9C7987F
  * Signing: Permit2 PermitTransferFrom (EIP-712)
- * Header:  X-PAYMENT (x402 v1)
+ * Header:  PAYMENT-SIGNATURE (x402 v2)
  *
  * @custodial-mvp
  *   Server holds the signing key via:
@@ -73,7 +73,7 @@ export interface PermitTransferFrom {
   deadline: bigint;
 }
 
-/** Encoded payment sent as the `X-PAYMENT` header on the retry request. */
+/** Encoded payment sent as the `PAYMENT-SIGNATURE` header on the retry request. */
 export interface OpenGradientWirePayload {
   x402Version: 1;
   scheme: string;
@@ -259,7 +259,7 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Encodes the signed permit as an x402 X-PAYMENT header and retries the inference request.
+   * Encodes the signed permit as an x402 PAYMENT-SIGNATURE header and retries the inference request.
    *
    * On success (HTTP 2xx): returns accepted=true with the inference response.
    * On failure: returns accepted=false with the error reason.
@@ -362,7 +362,7 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
     if (payment !== null) {
       // bigint fields (amount, nonce, deadline) serialised as decimal strings —
       // JSON.stringify throws on bigint by default.
-      headers["X-PAYMENT"] = btoa(
+      headers["PAYMENT-SIGNATURE"] = btoa(
         JSON.stringify(payment, (_, v) => (typeof v === "bigint" ? v.toString() : v)),
       );
     }

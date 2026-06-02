@@ -183,12 +183,12 @@ describe("OpenGradientAdapter", () => {
     assert.equal(submission.accepted, true);
     assert.equal(submission.txHash, txHash);
 
-    // Verify X-PAYMENT header was sent on the retry request.
+    // Verify PAYMENT-SIGNATURE header was sent on the retry request.
     assert.equal(spy.calls.length, 2, "should make initial request and paid retry");
     const secondRequest = spy.calls[1];
     assert.ok(secondRequest !== undefined);
-    const paymentHeader = secondRequest.headers.get("X-PAYMENT");
-    assert.ok(paymentHeader !== null, "X-PAYMENT header must be present on retry");
+    const paymentHeader = secondRequest.headers.get("PAYMENT-SIGNATURE");
+    assert.ok(paymentHeader !== null, "PAYMENT-SIGNATURE header must be present on retry");
 
     // Decode and validate the wire payload.
     const decoded = JSON.parse(atob(paymentHeader)) as OpenGradientWirePayload;

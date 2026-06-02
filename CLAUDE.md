@@ -237,7 +237,7 @@ These are implemented on assumptions. **Do NOT ship to production until DGrid co
 | 1 | BigInt in `X-PAYMENT` header | Decimal strings (`"1000000"`) via base64 encoding | Decimal strings accepted, or hex `0x...` required? |
 | 2 | `verifyingContract` in EIP-712 domain | ERC-20 token address (`requirement.asset`) | Token contract, or separate payment gateway? |
 | 3 | Inference ID generation | Deterministic `keccak256` of resource URL | Deterministic hash, or random per-request Task UUID? |
-| 4 | x402 header version | Code uses v1 `X-PAYMENT` header | Does OpenLedger support v1 (`X-PAYMENT`), v2 (`PAYMENT-SIGNATURE`), or both? Per official spec at github.com/coinbase/x402, v2 is the current standard. |
+| 4 | x402 header version | **`PAYMENT-SIGNATURE`** (v2) — confirmed via x402-foundation/x402 spec | ✅ Resolved |
 | 5 | `upto` scheme escrow mechanics | Not yet implemented — current code uses `exact` scheme only | Does OpenLedger's payment contract support temporary fund locking (escrow) based on `upto` limit, with provider drawing actual cost and remainder auto-released? |
 
 ---

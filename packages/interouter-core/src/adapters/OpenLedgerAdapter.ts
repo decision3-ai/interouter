@@ -80,7 +80,7 @@ export interface TransferAuthorization {
 }
 
 /**
- * Encoded payment sent as the `X-PAYMENT` header on the retry request.
+ * Encoded payment sent as the `PAYMENT-SIGNATURE` header on the retry request.
  * Internal wire format for the x402 protocol — not part of the public lifecycle API.
  */
 export interface X402WirePayload {
@@ -284,7 +284,7 @@ export class OpenLedgerAdapter implements ChainAdapter<OpenLedgerState> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Encodes the signed authorization as an x402 X-PAYMENT header and retries
+   * Encodes the signed authorization as an x402 PAYMENT-SIGNATURE header and retries
    * the inference request.
    *
    * On success (HTTP 2xx): returns accepted=true with the inference response.
@@ -390,7 +390,7 @@ export class OpenLedgerAdapter implements ChainAdapter<OpenLedgerState> {
     if (payment !== null) {
       // bigint fields (amount, validAfter, validBefore) must be serialised as
       // decimal strings — JSON.stringify throws on bigint by default.
-      headers["X-PAYMENT"] = btoa(
+      headers["PAYMENT-SIGNATURE"] = btoa(
         JSON.stringify(payment, (_, v) => (typeof v === "bigint" ? v.toString() : v)),
       );
     }
