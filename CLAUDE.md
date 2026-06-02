@@ -120,7 +120,7 @@ TypeScript monorepo. Minimal dependencies. ESM only.
     npm run clean
     npm run typecheck
 
-**Every commit must pass full test suite.** Current baseline: **33/33**.
+**Every commit must pass full test suite.** Current baseline: **45/45**.
 
 ---
 
@@ -251,7 +251,7 @@ All refactors MUST:
 - maintain deterministic test execution
 
 Before merging:
-- All tests pass (current minimum: **33/33**)
+- All tests pass (current minimum: **45/45**)
 - Existing behavior remains functionally equivalent unless explicitly approved
 
 ---
@@ -334,7 +334,7 @@ Before introducing ANY architectural change, answer these 6 questions:
 - [x] ChainAdapter 5-stage lifecycle implemented
 - [x] OpenLedgerAdapter monolith dismantled
 - [x] NearAdapter read-only + NotSupportedError
-- [x] Test suite at 33/33
+- [x] Test suite at 45/45
 - [x] ARCHITECTURE.md committed
 - [x] CLAUDE.md committed
 - [x] Repo pushed to GitHub
