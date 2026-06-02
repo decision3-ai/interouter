@@ -40,3 +40,14 @@ export type {
   X402WirePayload,
 } from "./adapters/OpenLedgerAdapter.js";
 export { OpenLedgerAdapterError } from "./adapters/OpenLedgerAdapter.js";
+
+export { OpenGradientAdapter } from "./adapters/OpenGradientAdapter.js";
+export type {
+  OpenGradientAdapterConfig,
+  OpenGradientState,
+  OpenGradientPaymentFlowStage,
+  OpenGradientPaymentRequirement,
+  PermitTransferFrom,
+  OpenGradientWirePayload,
+} from "./adapters/OpenGradientAdapter.js";
+export { OpenGradientAdapterError } from "./adapters/OpenGradientAdapter.js";

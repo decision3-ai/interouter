@@ -230,7 +230,8 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
   async preparePayment(requirement: PaymentRequirement): Promise<PaymentPayload> {
     const ogReq = requirement as OpenGradientPaymentRequirement;
     const permit = this.buildPermit(ogReq);
-    return { requirement, permit };
+    const payload = { requirement, permit };
+    return payload;
   }
 
   // ---------------------------------------------------------------------------
