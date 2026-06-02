@@ -3,8 +3,7 @@
  *
  * Chain:   Base Sepolia testnet (chainId: 84532)
  * Token:   $OPG — testnet: 0x240b09731D96979f50B2C649C9CE10FcF9C7987F
- *                  mainnet: 0xFbC2051AE2265686a469421b2C5A2D5462FbF5eB
- * Signing: EIP-3009 transferWithAuthorization
+ * Signing: Permit2 PermitTransferFrom (EIP-712)
  * Header:  X-PAYMENT (x402 v1)
  *
  * @custodial-mvp
@@ -41,62 +40,47 @@ const OPENGRADIENT_ENDPOINT = "https://llm.opengradient.ai";
 /** $OPG ERC-20 on Base Sepolia testnet. */
 const OPG_TOKEN_TESTNET = "0x240b09731D96979f50B2C649C9CE10FcF9C7987F" as Address;
 
-/** $OPG ERC-20 on Base mainnet (reference only — adapter currently targets testnet). */
-// const OPG_TOKEN_MAINNET = "0xFbC2051AE2265686a469421b2C5A2D5462FbF5eB" as Address;
+/** Permit2 singleton — same address on all EVM chains. */
+const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
 
 // ---------------------------------------------------------------------------
-// x402 / OpenGradient protocol types
+// Protocol types
 // ---------------------------------------------------------------------------
 
 /**
- * Payment requirement returned in the HTTP 402 response body.
- * Parsed directly from the response JSON — no `accepts` wrapper.
+ * Payment requirement from the HTTP 402 body.
+ * Parsed from body.accepts[0].
  */
 export interface OpenGradientPaymentRequirement extends PaymentRequirement {
-  /** URL of the inference resource being paid for. */
   resource: string;
-  /** EVM address to send the payment to. */
   payTo: Address;
-  /** Seconds before the payment authorization expires. */
   maxTimeoutSeconds: number;
-  /** $OPG ERC-20 token contract — the verifyingContract in the EIP-712 domain. */
   asset: Address;
   extra?: { name: string; version: string };
 }
 
 /**
- * EIP-3009 TransferWithAuthorization message — signed via EIP-712.
+ * Permit2 PermitTransferFrom message — signed via EIP-712.
  *
- * Domain: { name: "OPG", version: "1", chainId: 84532, verifyingContract: asset }
- *
- * Field names and types must match the on-chain $OPG token verifier exactly.
- * Any deviation produces an invalid signature.
+ * Domain: { name: "Permit2", chainId: 84532, verifyingContract: PERMIT2_ADDRESS }
+ * No `version` field in Permit2 domain.
  */
-export interface TransferWithAuthorization {
-  /** Wallet address funding the payment. */
-  from: Address;
-  /** OpenGradient payment recipient address. */
-  to: Address;
-  /** Payment amount in $OPG smallest unit. */
-  value: bigint;
-  /** Unix timestamp — authorization not valid before this second. 0 = immediately valid. */
-  validAfter: bigint;
-  /** Unix timestamp — authorization expires after this second. */
-  validBefore: bigint;
-  /** 32-byte random nonce — prevents replay. */
-  nonce: Hex;
+export interface PermitTransferFrom {
+  permitted: { token: Address; amount: bigint };
+  spender: Address;
+  /** Unordered uint256 nonce — random, collision probability negligible. */
+  nonce: bigint;
+  deadline: bigint;
 }
 
-/**
- * Encoded payment sent as the `X-PAYMENT` header on the retry request.
- */
+/** Encoded payment sent as the `X-PAYMENT` header on the retry request. */
 export interface OpenGradientWirePayload {
   x402Version: 1;
-  scheme: OpenGradientPaymentRequirement["scheme"];
-  network: OpenGradientPaymentRequirement["network"];
+  scheme: string;
+  network: string;
   payload: {
     signature: Hex;
-    authorization: TransferWithAuthorization;
+    permit: PermitTransferFrom;
   };
 }
 
@@ -107,34 +91,33 @@ export interface OpenGradientWirePayload {
 export type OpenGradientPaymentFlowStage =
   | { status: "idle" }
   | { status: "payment_required"; requirement: OpenGradientPaymentRequirement }
-  | { status: "signing"; requirement: OpenGradientPaymentRequirement; authorization: TransferWithAuthorization }
+  | { status: "signing"; requirement: OpenGradientPaymentRequirement; permit: PermitTransferFrom }
   | { status: "submitting"; requirement: OpenGradientPaymentRequirement; payload: OpenGradientWirePayload }
   | { status: "complete"; txHash: Hash; amountPaid: string; tokenAddress: Address }
   | { status: "failed"; reason: string };
 
 // ---------------------------------------------------------------------------
-// EIP-712 schema — EIP-3009 TransferWithAuthorization
+// EIP-712 schema — Permit2 PermitTransferFrom
 //
-// IMPORTANT: field order, names, and types must match the on-chain $OPG verifier exactly.
+// IMPORTANT: field order, names, and types must match the Permit2 contract exactly.
 // Any deviation produces an invalid signature.
 // ---------------------------------------------------------------------------
 
-const OPG_DOMAIN_NAME    = "OPG";
-const OPG_DOMAIN_VERSION = "1";
-
-const OPG_EIP712_TYPES = {
-  TransferWithAuthorization: [
-    { name: "from",        type: "address" },
-    { name: "to",          type: "address" },
-    { name: "value",       type: "uint256" },
-    { name: "validAfter",  type: "uint256" },
-    { name: "validBefore", type: "uint256" },
-    { name: "nonce",       type: "bytes32" },
+const PERMIT2_EIP712_TYPES = {
+  PermitTransferFrom: [
+    { name: "permitted", type: "TokenPermissions" },
+    { name: "spender",   type: "address" },
+    { name: "nonce",     type: "uint256" },
+    { name: "deadline",  type: "uint256" },
+  ],
+  TokenPermissions: [
+    { name: "token",  type: "address" },
+    { name: "amount", type: "uint256" },
   ],
 } as const;
 
 // ---------------------------------------------------------------------------
-// Config
+// Config / State / Error
 // ---------------------------------------------------------------------------
 
 export interface OpenGradientAdapterConfig {
@@ -147,16 +130,12 @@ export interface OpenGradientAdapterConfig {
   /** Address of the wallet funding inference payments. */
   signerAddress: Address;
   /**
-   * Hex-encoded private key for signing EIP-3009 authorizations.
+   * Hex-encoded private key for signing Permit2 authorizations.
    * When omitted, falls back to process.env.OPENGRADIENT_PRIVATE_KEY.
    * Never hardcode this value — always load from an environment variable.
    */
   privateKey?: Hex;
 }
-
-// ---------------------------------------------------------------------------
-// Result state stored in RouteResult.chainState["opengradient"]
-// ---------------------------------------------------------------------------
 
 export interface OpenGradientState {
   /** Final parsed inference result. Null when no payment succeeded. */
@@ -170,10 +149,6 @@ export interface OpenGradientState {
   /** Full stage snapshot for UI progress rendering. */
   flow: OpenGradientPaymentFlowStage;
 }
-
-// ---------------------------------------------------------------------------
-// Typed error
-// ---------------------------------------------------------------------------
 
 export class OpenGradientAdapterError extends Error {
   constructor(message: string) {
@@ -217,7 +192,7 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
    * Sends the initial inference request.
    *
    * - HTTP 200 → returns the inference result with no payment required.
-   * - HTTP 402 → parses the x402 PaymentRequirement and signals it to the router.
+   * - HTTP 402 → parses body.accepts[0] as the payment requirement.
    *
    * No signing or payment occurs here — this is a pure read operation.
    */
@@ -226,10 +201,7 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
 
     if (response.status !== 402) {
       const result: unknown = await response.json();
-      return {
-        state: this.buildFreeResult(result),
-        paymentRequired: null,
-      };
+      return { state: this.buildFreeResult(result), paymentRequired: null };
     }
 
     const requirement = await this.parsePaymentRequirement(response);
@@ -250,15 +222,15 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Builds an unsigned TransferWithAuthorization from the x402 payment requirement.
+   * Builds an unsigned Permit2 PermitTransferFrom from the payment requirement.
    *
-   * Determines: from, to, value, validAfter (0 = immediately), validBefore, nonce.
+   * Determines: permitted.token, permitted.amount, spender, nonce (random uint256), deadline.
    * Does NOT sign — returned as PaymentPayload for explicit signing in the next stage.
    */
   async preparePayment(requirement: PaymentRequirement): Promise<PaymentPayload> {
     const ogReq = requirement as OpenGradientPaymentRequirement;
-    const authorization = this.buildAuthorization(ogReq);
-    return { requirement, authorization };
+    const permit = this.buildPermit(ogReq);
+    return { requirement, permit };
   }
 
   // ---------------------------------------------------------------------------
@@ -266,19 +238,18 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Signs the TransferWithAuthorization using EIP-712 typed data.
+   * Signs the PermitTransferFrom using EIP-712 typed data.
    *
-   * Signing key: this.account (derived from OPENGRADIENT_PRIVATE_KEY).
-   * Domain: { name: "OPG", version: "1", chainId: 84532, verifyingContract: asset }.
-   * Type:   TransferWithAuthorization — see OPG_EIP712_TYPES.
+   * Domain: { name: "Permit2", chainId: 84532, verifyingContract: PERMIT2_ADDRESS }.
+   * No `version` field — Permit2 domain omits it.
    *
    * Signing is fully offline — no RPC call needed.
    * Throws on signing failure (e.g. domain separator mismatch).
    */
   async sign(payload: PaymentPayload): Promise<SignedPayload> {
-    const ogPayload = payload as PaymentPayload & { authorization: TransferWithAuthorization };
-    const x402Req = payload.requirement as OpenGradientPaymentRequirement;
-    const signature = await this.signAuthorization(ogPayload.authorization, x402Req);
+    const ogPayload = payload as PaymentPayload & { permit: PermitTransferFrom };
+    const ogReq = payload.requirement as OpenGradientPaymentRequirement;
+    const signature = await this.signPermit(ogPayload.permit, ogReq);
     return { payload, signature };
   }
 
@@ -287,14 +258,13 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
   // ---------------------------------------------------------------------------
 
   /**
-   * Encodes the signed authorization as an x402 X-PAYMENT header and retries
-   * the inference request.
+   * Encodes the signed permit as an x402 X-PAYMENT header and retries the inference request.
    *
    * On success (HTTP 2xx): returns accepted=true with the inference response.
    * On failure: returns accepted=false with the error reason.
    */
   async submit(signed: SignedPayload, context: RouteContext): Promise<SubmissionResult> {
-    const ogPayload = signed.payload as PaymentPayload & { authorization: TransferWithAuthorization };
+    const ogPayload = signed.payload as PaymentPayload & { permit: PermitTransferFrom };
     const ogReq = signed.payload.requirement as OpenGradientPaymentRequirement;
 
     const wirePayload: OpenGradientWirePayload = {
@@ -303,7 +273,7 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
       network: ogReq.network,
       payload: {
         signature: signed.signature as Hex,
-        authorization: ogPayload.authorization,
+        permit: ogPayload.permit,
       },
     };
 
@@ -334,7 +304,7 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
   // ---------------------------------------------------------------------------
 
   /**
-   * EIP-3009 payments are verified atomically on submission — the server validates
+   * Permit2 payments are verified atomically on submission — the facilitator validates
    * the EIP-712 signature and settles inline. No separate finality wait.
    *
    * Builds the final OpenGradientState from the submission result.
@@ -387,11 +357,9 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
     context: RouteContext,
     payment: OpenGradientWirePayload | null,
   ): Promise<Response> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (payment !== null) {
-      // bigint fields (value, validAfter, validBefore) serialised as decimal strings —
+      // bigint fields (amount, nonce, deadline) serialised as decimal strings —
       // JSON.stringify throws on bigint by default.
       headers["X-PAYMENT"] = btoa(
         JSON.stringify(payment, (_, v) => (typeof v === "bigint" ? v.toString() : v)),
@@ -406,68 +374,55 @@ export class OpenGradientAdapter implements ChainAdapter<OpenGradientState> {
 
   private async parsePaymentRequirement(response: Response): Promise<OpenGradientPaymentRequirement> {
     const body: unknown = await response.json();
+    const accepts = (body as { accepts?: unknown[] } | null)?.accepts;
+    const req = Array.isArray(accepts) ? accepts[0] : undefined;
     if (
-      typeof body !== "object" ||
-      body === null ||
-      !("scheme" in body) ||
-      !("network" in body) ||
-      !("maxAmountRequired" in body) ||
-      !("resource" in body) ||
-      !("payTo" in body) ||
-      !("asset" in body)
+      typeof req !== "object" || req === null ||
+      !("scheme" in req) || !("network" in req) || !("maxAmountRequired" in req) ||
+      !("resource" in req) || !("payTo" in req) || !("asset" in req)
     ) {
       throw new OpenGradientAdapterError("402 response body missing valid payment requirement");
     }
-    return body as OpenGradientPaymentRequirement;
+    return req as OpenGradientPaymentRequirement;
   }
 
-  private buildAuthorization(requirement: OpenGradientPaymentRequirement): TransferWithAuthorization {
+  private buildPermit(requirement: OpenGradientPaymentRequirement): PermitTransferFrom {
     const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    // Permit2 unordered nonce: random uint256 — collision probability negligible.
+    const nonceBytes = crypto.getRandomValues(new Uint8Array(32));
+    const nonce = nonceBytes.reduce((acc, b) => (acc << 8n) | BigInt(b), 0n);
     return {
-      from:        this.config.signerAddress,
-      to:          requirement.payTo,
-      value:       BigInt(requirement.maxAmountRequired),
-      validAfter:  0n,
-      validBefore: nowSec + BigInt(requirement.maxTimeoutSeconds),
-      nonce: ("0x" + Array.from(crypto.getRandomValues(new Uint8Array(32)))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("")) as Hex,
+      permitted: {
+        token:  requirement.asset,
+        amount: BigInt(requirement.maxAmountRequired),
+      },
+      spender:  requirement.payTo,
+      nonce,
+      deadline: nowSec + BigInt(requirement.maxTimeoutSeconds),
     };
   }
 
-  /**
-   * Signs an EIP-3009 TransferWithAuthorization using EIP-712 typed data.
-   *
-   * Domain: { name: "OPG", version: "1", chainId, verifyingContract: requirement.asset }
-   * Type:   TransferWithAuthorization — see OPG_EIP712_TYPES above.
-   *
-   * Uses privateKeyToAccount so signing is fully offline — no RPC call needed.
-   */
-  private async signAuthorization(
-    authorization: TransferWithAuthorization,
-    requirement: OpenGradientPaymentRequirement,
+  private async signPermit(
+    permit: PermitTransferFrom,
+    _requirement: OpenGradientPaymentRequirement,
   ): Promise<Hex> {
-    const domain = {
-      name:              OPG_DOMAIN_NAME,
-      version:           OPG_DOMAIN_VERSION,
-      chainId:           this.config.chainId,
-      verifyingContract: requirement.asset,
-    } as const;
-
-    const message = {
-      from:        authorization.from,
-      to:          authorization.to,
-      value:       authorization.value,
-      validAfter:  authorization.validAfter,
-      validBefore: authorization.validBefore,
-      nonce:       authorization.nonce,
-    };
-
     return this.account.signTypedData({
-      domain,
-      types: OPG_EIP712_TYPES,
-      primaryType: "TransferWithAuthorization",
-      message,
+      domain: {
+        name:              "Permit2",
+        chainId:           this.config.chainId,
+        verifyingContract: PERMIT2_ADDRESS,
+      },
+      types:       PERMIT2_EIP712_TYPES,
+      primaryType: "PermitTransferFrom",
+      message: {
+        permitted: {
+          token:  permit.permitted.token,
+          amount: permit.permitted.amount,
+        },
+        spender:  permit.spender,
+        nonce:    permit.nonce,
+        deadline: permit.deadline,
+      },
     });
   }
 

@@ -36,6 +36,9 @@ const SAMPLE_REQUIREMENT: OpenGradientPaymentRequirement = {
   extra: { name: "OPG", version: "1" },
 };
 
+// 402 body uses accepts[] wrapper
+const MOCK_402_BODY = { accepts: [SAMPLE_REQUIREMENT] };
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -130,7 +133,7 @@ describe("OpenGradientAdapter", () => {
   // --- readState: 402 surfaces payment requirement ---
 
   it("5. readState on 402 — surfaces payment requirement, no signing occurs", async () => {
-    const spy = spyFetch(makeResponse(402, SAMPLE_REQUIREMENT));
+    const spy = spyFetch(makeResponse(402, MOCK_402_BODY));
     globalThis.fetch = spy.fn;
 
     const adapter = new OpenGradientAdapter(BASE_CONFIG);
@@ -147,12 +150,12 @@ describe("OpenGradientAdapter", () => {
 
   // --- Full lifecycle ---
 
-  it("6. full EIP-3009 lifecycle — preparePayment + sign + submit + awaitFinality produces complete state", async () => {
+  it("6. full Permit2 lifecycle — preparePayment + sign + submit + awaitFinality produces complete state", async () => {
     const inferenceBody = { answer: "the meaning of life", model: "opengradient-v1" };
     const txHash = "0xdeadbeef00000000000000000000000000000000000000000000000000000001";
 
     const spy = spyFetch(
-      makeResponse(402, SAMPLE_REQUIREMENT),
+      makeResponse(402, MOCK_402_BODY),
       makeResponse(200, inferenceBody, { "x-payment-tx-hash": txHash }),
     );
     globalThis.fetch = spy.fn;
@@ -168,7 +171,7 @@ describe("OpenGradientAdapter", () => {
     const payload = await adapter.preparePayment(paymentRequired);
     assert.ok(payload.requirement === paymentRequired);
 
-    // Step 3: sign — EIP-3009 EIP-712 produces a 65-byte hex signature
+    // Step 3: sign — Permit2 EIP-712 produces a 65-byte hex signature
     const signed = await adapter.sign(payload);
     assert.ok(
       signed.signature.startsWith("0x") && signed.signature.length === 132,
@@ -192,10 +195,11 @@ describe("OpenGradientAdapter", () => {
     assert.equal(decoded.x402Version, 1);
     assert.equal(decoded.scheme, "exact");
     assert.equal(decoded.network, "eip155:84532");
-    assert.equal(decoded.payload.authorization.from, TEST_SIGNER);
-    assert.equal(decoded.payload.authorization.to, TEST_RECIPIENT);
-    assert.equal(decoded.payload.authorization.value, "1000000");
-    assert.equal(decoded.payload.authorization.validAfter, "0");
+    assert.equal(decoded.payload.permit.permitted.token, TEST_ASSET);
+    assert.equal(decoded.payload.permit.permitted.amount, "1000000");
+    assert.equal(decoded.payload.permit.spender, TEST_RECIPIENT);
+    assert.ok(typeof decoded.payload.permit.nonce === "string", "nonce should be serialised string");
+    assert.ok(typeof decoded.payload.permit.deadline === "string", "deadline should be serialised string");
 
     // Step 5: awaitFinality
     const finality = await adapter.awaitFinality(submission);
@@ -216,7 +220,7 @@ describe("OpenGradientAdapter", () => {
   // --- sign failure ---
 
   it("7. sign throws on signing failure — error is explicit, not hidden", async () => {
-    const spy = spyFetch(makeResponse(402, SAMPLE_REQUIREMENT));
+    const spy = spyFetch(makeResponse(402, MOCK_402_BODY));
     globalThis.fetch = spy.fn;
 
     const adapter = new OpenGradientAdapter(BASE_CONFIG);
@@ -247,7 +251,7 @@ describe("OpenGradientAdapter", () => {
 
   it("8. submit returns accepted=false on post-payment non-200 response", async () => {
     const spy = spyFetch(
-      makeResponse(402, SAMPLE_REQUIREMENT),
+      makeResponse(402, MOCK_402_BODY),
       makeResponse(503, { error: "service unavailable" }),
     );
     globalThis.fetch = spy.fn;
@@ -284,8 +288,10 @@ describe("OpenGradientAdapter", () => {
     for (const badBody of [
       null,
       {},
-      { scheme: "exact" },                          // missing network, maxAmountRequired, etc.
-      { scheme: "exact", network: "eip155:84532" }, // missing maxAmountRequired, resource, payTo, asset
+      { accepts: [] },                                              // empty array
+      { accepts: [{}] },                                            // missing all fields
+      { accepts: [{ scheme: "exact" }] },                          // missing network, etc.
+      { accepts: [{ scheme: "exact", network: "eip155:84532" }] }, // missing resource/payTo/asset
     ]) {
       const spy = spyFetch(makeResponse(402, badBody));
       globalThis.fetch = spy.fn;
