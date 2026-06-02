@@ -56,11 +56,91 @@ These open blockers exist within a broader context: the x402 ecosystem is fragme
 
 These are implemented on assumptions and must be confirmed with DGrid before any production testing:
 
-| # | Issue | Current assumption | Needs confirmation |
-|---|-------|-------------------|-------------------|
-| 1 | BigInt serialisation in `X-PAYMENT` | `amount`, `validAfter`, `validBefore` sent as decimal strings via base64 encoding | Does DGrid verifier accept decimal strings or require hex `0x...`? |
-| 2 | `verifyingContract` in EIP-712 domain | Set to `requirement.asset` (ERC-20 token address) | Is verification done by the token contract or a separate payment gateway? |
-| 3 | Inference ID generation | `keccak256` hash of resource URL (deterministic) | Does DGrid expect a random per-request Task UUID from the 402 response metadata? |
+| # | Issue | Current assumption | Status |
+|---|-------|-------------------|--------|
+| 1 | BigInt serialisation in `PAYMENT-SIGNATURE` header | `amount`, `nonce`, `deadline` sent as decimal strings via base64 encoding | **Spec reviewed — decimal strings confirmed correct. Pending vendor confirmation.** |
+| 2 | `verifyingContract` + EIP-712 type in Permit2 domain | `verifyingContract = PERMIT2_ADDRESS`, type = `PermitTransferFrom`, spender = `payTo` | **Spec reviewed — foundation uses proxy contract + witness pattern. Pending vendor confirmation.** |
+| 3 | Inference ID generation | `keccak256` hash of resource URL (deterministic) | Pending DGrid confirmation |
+
+---
+
+### Blocker #1 — BigInt serialisation (spec reviewed 2026-06-02)
+
+**Source:** `typescript/packages/mechanisms/evm/src/utils.ts` and `shared/permit2.ts` in x402-foundation/x402.
+
+The reference implementation serialises **all numeric fields as decimal strings** — no `0x` hex prefix anywhere in the wire payload:
+
+```typescript
+// utils.ts — nonce generation
+export function createPermit2Nonce(): string {
+  const randomBytes = getCrypto().getRandomValues(new Uint8Array(32));
+  return BigInt(toHex(randomBytes)).toString(); // → "115792089..." decimal string
+}
+
+// shared/permit2.ts — payload construction
+const deadline = (now + paymentRequirements.maxTimeoutSeconds).toString(); // decimal
+const validAfter = (now - 600).toString();                                  // decimal
+// amount: paymentRequirements.amount — already a decimal string from the 402 body
+```
+
+The facilitator-side (`buildExactPermit2SettleArgs`) re-parses these strings back to BigInt:
+```typescript
+amount: BigInt(permit2Payload.permit2Authorization.permitted.amount),
+nonce:  BigInt(permit2Payload.permit2Authorization.nonce),
+deadline: BigInt(permit2Payload.permit2Authorization.deadline),
+```
+
+**Conclusion:** Our current `JSON.stringify(payment, (_, v) => (typeof v === "bigint" ? v.toString() : v))` replacer produces the correct format. No change needed for this aspect.
+
+**Still needs vendor confirmation from DGrid/OpenGradient:** that their facilitator verifier also accepts decimal strings (not hex). The spec is clear; vendor deviation is possible.
+
+---
+
+### Blocker #2 — EIP-712 domain + wire shape (spec reviewed 2026-06-02)
+
+**Source:** `typescript/packages/mechanisms/evm/src/shared/permit2.ts` and `exact/client/permit2.ts` in x402-foundation/x402.
+
+The foundation reference uses a **witness pattern** that differs structurally from our current `OpenGradientAdapter` and `OpenLedgerAdapter` implementations. Key differences:
+
+| Field | Our implementation | x402 foundation reference |
+|---|---|---|
+| Wire key | `permit` | `permit2Authorization` |
+| EIP-712 primary type | `PermitTransferFrom` | `PermitWitnessTransferFrom` |
+| `verifyingContract` | `PERMIT2_ADDRESS` ✓ | `PERMIT2_ADDRESS` ✓ |
+| `spender` in EIP-712 | `requirement.payTo` | `x402ExactPermit2ProxyAddress` (a proxy contract) |
+| `payTo` location | `permit.spender` | `permit2Authorization.witness.to` |
+| `validAfter` | not present | `permit2Authorization.witness.validAfter` (clock skew −600s) |
+| `from` (payer address) | not present | `permit2Authorization.from` |
+
+**Foundation wire payload structure:**
+```typescript
+{
+  x402Version: number,
+  payload: {
+    signature: "0x...",
+    permit2Authorization: {
+      from: "0x...",           // payer address
+      permitted: {
+        token: "0x...",        // ERC-20 token
+        amount: "1000000",     // decimal string
+      },
+      spender: "0x...",        // x402Permit2Proxy contract, NOT payTo
+      nonce: "115792089...",   // decimal string (random uint256)
+      deadline: "1748123456",  // decimal string (unix timestamp)
+      witness: {
+        to: "0x...",           // payTo recipient
+        validAfter: "1748119256", // decimal string (now - 600s)
+      },
+    },
+  },
+}
+```
+
+**`verifyingContract` is correct in both:** both use the Permit2 singleton `0x000000000022D473030F116dDEE9F6B43aC78BA3`. Our assumption that it was `requirement.asset` (the token address) was **wrong** — it was already fixed to `PERMIT2_ADDRESS` in `OpenGradientAdapter`.
+
+**Critical open question:** OpenGradient's facilitator may or may not use the foundation's proxy+witness pattern. If it uses a simpler direct `PermitTransferFrom` (spender = payTo, no witness), our current implementation is correct. If it uses the foundation's `PermitWitnessTransferFrom` pattern, the wire shape, EIP-712 types, and signing domain are all wrong.
+
+**No code change until OpenGradient confirms which pattern their facilitator verifier expects.**
 
 ---
 
