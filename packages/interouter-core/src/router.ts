@@ -4,11 +4,13 @@
  * Architecture:
  *   ChainAdapters expose a five-stage lifecycle:
  *     readState → preparePayment → sign → submit → awaitFinality
- *   The router orchestrates these stages — read-only adapters complete at
- *   readState; adapters that surface a PaymentRequirement proceed through
- *   the full payment pipeline.
- *   InferenceProvider optionally enriches the aggregated payload with AI results.
- *   resolve() merges everything into a single RouteResult delivered to the frontend.
+ *   resolve() runs in three phases:
+ *     Phase 1 — readState() in parallel for all adapters. Read-only adapters
+ *               (paymentRequired === null) resolve immediately. Payment-required
+ *               adapters are queued in priority order (adapter array order).
+ *     Phase 2 — Payment pipeline runs sequentially in priority order.
+ *               First success wins; failures fall through to the next adapter.
+ *     Phase 3 — Optional AI inference over the full chainState.
  */
 
 const DEFAULT_ADAPTER_TIMEOUT_MS = 5_000;
@@ -178,11 +180,14 @@ export interface RouteResult {
 // ---------------------------------------------------------------------------
 
 export interface RouterConfig {
-  /** Chain adapters to run in parallel on every resolve() call */
+  /**
+   * Chain adapters. Array order determines payment fallback priority —
+   * adapters[0] is tried first; on failure, adapters[1] is tried, and so on.
+   */
   adapters: ReadonlyArray<ChainAdapter>;
   /** Optional AI inference provider */
   aiProvider?: InferenceProvider;
-  /** Timeout in milliseconds for each adapter's full lifecycle (default: 5000) */
+  /** Timeout in milliseconds per adapter per phase (default: 5000) */
   adapterTimeoutMs?: number;
 }
 
@@ -200,43 +205,78 @@ export class InterouterRouter {
   /**
    * Resolve a route context into a single aggregated RouteResult.
    *
-   * - Each adapter's full lifecycle runs in parallel via Promise.allSettled.
-   * - Within a single adapter, stages execute sequentially:
-   *     readState → preparePayment → sign → submit → awaitFinality
-   * - readState-only adapters (paymentRequired === null) skip the payment stages.
-   * - Each adapter is individually bounded by adapterTimeoutMs.
-   * - Failed or timed-out adapters are recorded as AdapterError; resolve() never throws.
-   * - AI inference runs after all adapters complete, receiving the full chainState as input.
+   * Phase 1 — readState() runs in parallel for all adapters, each guarded by
+   *   adapterTimeoutMs. Read-only adapters (paymentRequired === null) store
+   *   their state immediately. Payment-required adapters queue in priority order.
+   *
+   * Phase 2 — Payment pipeline runs sequentially in priority order.
+   *   First success wins; the remaining payment adapters are skipped.
+   *   Failures (throws, timeout, or accepted=false) store an AdapterError and
+   *   fall through to the next adapter. resolve() never throws.
+   *
+   * Phase 3 — AI inference runs over the full chainState. Failure is non-fatal.
    */
   async resolve(context: RouteContext): Promise<RouteResult> {
     const start = Date.now();
     const timeoutMs = this.config.adapterTimeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS;
 
-    // Fan out — all adapter lifecycles run in parallel, each guarded by a per-adapter timeout.
-    const settled = await Promise.allSettled(
+    // Phase 1: readState() — all adapters in parallel, each guarded by per-adapter timeout.
+    const readSettled = await Promise.allSettled(
       this.config.adapters.map((adapter) =>
-        withTimeout(this.runAdapterLifecycle(adapter, context), timeoutMs, adapter.id),
+        withTimeout(
+          adapter.readState(context).then((readResult) => ({ adapter, readResult })),
+          timeoutMs,
+          adapter.id,
+        ),
       ),
     );
 
-    // Collect results — fulfilled values stored directly, rejections as AdapterError tokens.
+    // Partition: read-only adapters store state immediately; payment-required adapters
+    // queue in priority order for the sequential fallback pipeline.
     const chainState: Record<string, unknown | AdapterError> = {};
+    const paymentQueue: Array<{ adapter: ChainAdapter; readResult: ReadResult<unknown> }> = [];
+
     for (let i = 0; i < this.config.adapters.length; i++) {
       const adapter = this.config.adapters[i];
-      const result = settled[i];
-      if (adapter === undefined || result === undefined) continue;
+      const settled = readSettled[i];
+      if (adapter === undefined || settled === undefined) continue;
 
-      if (result.status === "fulfilled") {
-        chainState[adapter.id] = result.value;
-      } else {
-        const reason = result.reason instanceof Error
-          ? result.reason.message
-          : String(result.reason);
+      if (settled.status === "rejected") {
+        const reason = settled.reason instanceof Error
+          ? settled.reason.message
+          : String(settled.reason);
         chainState[adapter.id] = { error: true, reason } satisfies AdapterError;
+        continue;
+      }
+
+      const { readResult } = settled.value;
+      if (readResult.paymentRequired === null) {
+        chainState[adapter.id] = readResult.state;
+      } else {
+        paymentQueue.push({ adapter, readResult });
       }
     }
 
-    // AI inference — optional enrichment step; failure is non-fatal.
+    // Phase 2: Payment pipeline — sequential in priority order, first success wins.
+    // Each attempt is individually bounded by adapterTimeoutMs.
+    // accepted=false and thrown errors both trigger fallback to the next adapter.
+    for (const { adapter, readResult } of paymentQueue) {
+      try {
+        const state = await withTimeout(
+          this.runPaymentPipeline(adapter, readResult, context),
+          timeoutMs,
+          adapter.id,
+        );
+        chainState[adapter.id] = state;
+        break; // First success wins — remaining payment adapters are skipped.
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        chainState[adapter.id] = { error: true, reason } satisfies AdapterError;
+        // Continue to next adapter in queue.
+      }
+    }
+
+    // Phase 3: AI inference — optional enrichment; failure is non-fatal.
     let inference: unknown = null;
     if (this.config.aiProvider !== undefined) {
       try {
@@ -255,27 +295,28 @@ export class InterouterRouter {
   }
 
   /**
-   * Runs a single adapter through its full lifecycle.
+   * Runs the payment stages of a single adapter:
+   *   preparePayment → sign → submit → awaitFinality
    *
-   * If readState() signals paymentRequired, the payment pipeline is executed
-   * sequentially. Otherwise, the state from readState() is returned directly.
+   * readState() has already completed — readResult is passed in.
+   * Throws on any failure so the caller can fall back to the next adapter:
+   *   - Any stage throws
+   *   - BudgetExceededError (actualCharge > maxAmountRequired)
+   *   - submission.accepted === false (payment rejected by provider)
    */
-  private async runAdapterLifecycle<TState>(
+  private async runPaymentPipeline<TState>(
     adapter: ChainAdapter<TState>,
+    readResult: ReadResult<TState>,
     context: RouteContext,
   ): Promise<TState> {
-    const { state, paymentRequired } = await adapter.readState(context);
-
-    if (paymentRequired === null) {
-      return state;
-    }
+    const { paymentRequired } = readResult;
+    if (paymentRequired === null) return readResult.state;
 
     const payload = await adapter.preparePayment(paymentRequired);
     const signed = await adapter.sign(payload);
     const submission = await adapter.submit(signed, context);
 
-    // Circuit breaker: if the provider reported an actual charge exceeding the
-    // authorized ceiling, halt immediately. No silent overspend, no partial settlement.
+    // Circuit breaker: halt on budget overrun (upto scheme).
     if (
       submission.actualCharge !== undefined &&
       BigInt(submission.actualCharge) > BigInt(paymentRequired.maxAmountRequired)
@@ -284,6 +325,15 @@ export class InterouterRouter {
         adapter.id,
         submission.actualCharge,
         paymentRequired.maxAmountRequired,
+      );
+    }
+
+    // Non-accepted submission triggers fallback to the next adapter.
+    if (!submission.accepted) {
+      throw new Error(
+        typeof submission.responseData === "string"
+          ? submission.responseData
+          : "payment submission rejected",
       );
     }
 

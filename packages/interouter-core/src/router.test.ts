@@ -81,6 +81,30 @@ function makePayingAdapter<T>(
   };
 }
 
+/** Creates a payment adapter that fails at a specified stage. */
+function makePayingAdapterThatFails(
+  id: string,
+  requirement: PaymentRequirement,
+  failAt: "sign" | "submit",
+): ChainAdapter {
+  return {
+    id,
+    readState: async () => ({ state: {}, paymentRequired: requirement }),
+    preparePayment: async (req) => ({ requirement: req }),
+    sign: async (payload) => {
+      if (failAt === "sign") throw new Error(`${id}: signing failed`);
+      return { payload, signature: "0xfail" };
+    },
+    submit: async (signed) => ({
+      accepted: failAt !== "submit",
+      txHash: null,
+      requirement: signed.payload.requirement,
+      responseData: failAt === "submit" ? `${id}: submission rejected` : "ok",
+    }),
+    awaitFinality: async () => ({ finalized: true, txHash: null, state: {} }),
+  };
+}
+
 function isAdapterError(v: unknown): v is AdapterError {
   return typeof v === "object" && v !== null && (v as AdapterError).error === true;
 }
@@ -278,6 +302,61 @@ describe("InterouterRouter.resolve()", () => {
       (entry as AdapterError).reason.includes("signing key expired"),
       `reason should contain signing error, got: ${(entry as AdapterError).reason}`,
     );
+  });
+
+  it("11. fallback — first payment adapter fails (sign throws), second succeeds", async () => {
+    const req: PaymentRequirement = { scheme: "exact", network: "test-net", maxAmountRequired: "1000" };
+
+    const router = new InterouterRouter({
+      adapters: [
+        makePayingAdapterThatFails("openledger",  req, "sign"),
+        makePayingAdapter("opengradient", {}, { complete: true }, req),
+      ],
+    });
+
+    const result = await router.resolve(ctx);
+
+    assert.ok(isAdapterError(result.chainState["openledger"]), "openledger should be AdapterError");
+    assert.ok(
+      (result.chainState["openledger"] as AdapterError).reason.includes("signing failed"),
+    );
+    assert.deepEqual(result.chainState["opengradient"], { complete: true });
+  });
+
+  it("12. fallback — all payment adapters fail → all AdapterError, resolve() does not throw", async () => {
+    const req: PaymentRequirement = { scheme: "exact", network: "test-net", maxAmountRequired: "1000" };
+
+    const router = new InterouterRouter({
+      adapters: [
+        makePayingAdapterThatFails("openledger",   req, "sign"),
+        makePayingAdapterThatFails("opengradient", req, "sign"),
+      ],
+    });
+
+    const result = await router.resolve(ctx);
+
+    assert.ok(isAdapterError(result.chainState["openledger"]),   "openledger should be AdapterError");
+    assert.ok(isAdapterError(result.chainState["opengradient"]), "opengradient should be AdapterError");
+    assert.equal(result.inference, null);
+  });
+
+  it("13. fallback — accepted=false triggers fallback, second adapter succeeds", async () => {
+    const req: PaymentRequirement = { scheme: "exact", network: "test-net", maxAmountRequired: "1000" };
+
+    const router = new InterouterRouter({
+      adapters: [
+        makePayingAdapterThatFails("openledger",  req, "submit"), // submit returns accepted: false
+        makePayingAdapter("opengradient", {}, { complete: true }, req),
+      ],
+    });
+
+    const result = await router.resolve(ctx);
+
+    assert.ok(
+      isAdapterError(result.chainState["openledger"]),
+      "openledger should be AdapterError after rejected submission",
+    );
+    assert.deepEqual(result.chainState["opengradient"], { complete: true });
   });
 
 });
