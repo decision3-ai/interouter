@@ -24,6 +24,13 @@ export interface NearAdapterConfig {
   accountId?: string;
   /** Optional view-function calls to fan out alongside the account query. */
   viewCalls?: ViewCallConfig[];
+  /**
+   * Private key for signing transactions.
+   * Format: "ed25519:<base58-encoded-key>" (e.g. from ~/.near-credentials).
+   * When omitted, falls back to process.env.NEAR_PRIVATE_KEY.
+   * Required for payment lifecycle methods (preparePayment, sign, submit, awaitFinality).
+   */
+  privateKey?: string;
 }
 
 // ---------------------------------------------------------------------------

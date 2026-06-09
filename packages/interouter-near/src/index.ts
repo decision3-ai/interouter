@@ -5,6 +5,7 @@
  */
 
 export { NearAdapter } from "./adapter.js";
+export type { NearPaymentPayload, NearSignedPayload } from "./adapter.js";
 export { NearAdapterError } from "./types.js";
 
 export type {
