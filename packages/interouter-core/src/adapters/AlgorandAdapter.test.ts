@@ -10,6 +10,7 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import algosdk from "algosdk";
+import { encodePaymentResponseHeader } from "@x402-avm/core/http";
 import { AlgorandAdapter, AlgorandAdapterError } from "./AlgorandAdapter.js";
 import type { RouteContext } from "../router.js";
 
@@ -133,7 +134,7 @@ describe("AlgorandAdapter", () => {
     await assert.rejects(adapter.readState(ctx), AlgorandAdapterError);
   });
 
-  it("6. does NOT populate actualCharge (exact scheme → no circuit breaker)", async () => {
+  it("6. reads txHash from the settlement response and leaves actualCharge unset", async () => {
     const adapter = makeAdapter();
     const requirement = {
       scheme: "exact" as const,
@@ -143,11 +144,19 @@ describe("AlgorandAdapter", () => {
       asset: 12345,
       resource: "https://example.test/api/inference",
     };
-    const spy = spyFetch(makeResponse(200, { ok: true }, { "X-PAYMENT-TX-HASH": "TESTHASH" }));
+    // x402 v2 settlement comes back in the PAYMENT-RESPONSE header as a base64
+    // SettleResponse; the adapter decodes it and surfaces `transaction` as txHash.
+    const settleHeader = encodePaymentResponseHeader({
+      success: true,
+      transaction: "TESTHASH",
+      network: "algorand:test",
+      payer: requirement.payTo,
+    });
+    const spy = spyFetch(makeResponse(200, { ok: true }, { "PAYMENT-RESPONSE": settleHeader }));
     globalThis.fetch = spy.fn;
 
     const signed = {
-      payload: { requirement, unsignedTxnB64: "", txId: "TESTHASH" },
+      payload: { requirement, sdkRequirement: {} },
       signature: "c2lnbmF0dXJl",
     };
     const submission = await adapter.submit(signed as never, ctx);

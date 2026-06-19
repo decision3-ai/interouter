@@ -17,30 +17,37 @@
  * Finality: Algorand has single-block deterministic finality (~3s), so this
  * adapter is a strong candidate for adapters[0] (first priority) in the router.
  *
- * ───────────────────────────────────────────────────────────────────────────
- * ⚠️ WIRE-FORMAT CONFIRMATION POINTS (read-only by design until verified)
- * Three spots are marked `CONFIRM:` below. They are the AVM-specific encodings
- * that must match GoPlausible's @x402-avm spec EXACTLY before sending real funds:
- *   1. How the 402 PaymentRequirements are surfaced (header name vs JSON body)
- *   2. The exact X-PAYMENT header name + payload JSON shape for AVM `exact`
- *   3. Whether settlement uses fee-abstraction atomic groups (facilitator co-signs)
- * GoPlausible docs are public:
- *   github.com/GoPlausible/.github/tree/main/profile/algorand-x402-documentation
- * Until these are confirmed against their types, keep this adapter on TESTNET.
- * ───────────────────────────────────────────────────────────────────────────
+ * Wire format: payment construction, ed25519 signing, the x402 v2 header
+ * (PAYMENT-SIGNATURE) and the settlement response (PAYMENT-RESPONSE) are all
+ * delegated to GoPlausible's @x402-avm SDK (ExactAvmScheme + core http helpers),
+ * so there is no hand-rolled encoding to keep in sync with their spec. The 402
+ * requirement surfaced by readState is still read from the response body; switch
+ * to PAYMENT-REQUIRED header parsing here if the facilitator emits it that way.
  */
 
 import algosdk from "algosdk";
 
-// Canonical AVM constants — import from GoPlausible rather than hardcoding
-// genesis hashes / ASA ids. CONFIRM these export names against the installed
-// @x402-avm/avm version (v2.6+).
+// Canonical AVM constants + the exact-scheme client from GoPlausible.
+// ExactAvmScheme builds and signs the atomic ASA-transfer group; the
+// @x402-avm/core http helpers handle the x402 wire encoding so we no longer
+// hand-roll the payment header / settlement parsing.
 import {
   ALGORAND_MAINNET_CAIP2,
   ALGORAND_TESTNET_CAIP2,
-  // USDC asset ids exposed by the package; confirm exact export names.
+  USDC_MAINNET_ASA_ID,
   USDC_TESTNET_ASA_ID,
+  ExactAvmScheme,
+  toClientAvmSigner,
 } from "@x402-avm/avm";
+import {
+  encodePaymentSignatureHeader,
+  decodePaymentResponseHeader,
+} from "@x402-avm/core/http";
+import type {
+  PaymentRequirements as AvmSdkRequirements,
+  PaymentPayload as AvmWirePayload,
+  SettleResponse,
+} from "@x402-avm/core/types";
 
 import type {
   ChainAdapter,
@@ -86,13 +93,15 @@ export interface AvmPaymentRequirement extends PaymentRequirement {
   extra?: Record<string, unknown> | undefined;
 }
 
-/** Unsigned AVM payment: the encoded transaction(s) to be signed. */
+/**
+ * Prepared AVM payment. The actual txn group is built and signed inside the
+ * `@x402-avm/avm` ExactAvmScheme during sign(), so all we carry forward is the
+ * SDK-shaped requirement that drives that construction.
+ */
 export interface AvmPaymentPayload extends PaymentPayload {
   requirement: AvmPaymentRequirement;
-  /** Unsigned transaction bytes (msgpack), base64-encoded. */
-  unsignedTxnB64: string;
-  /** Transaction id, threaded through to finality confirmation. */
-  txId: string;
+  /** Requirement re-shaped to the @x402-avm/core PaymentRequirements contract. */
+  sdkRequirement: AvmSdkRequirements;
 }
 
 type PaymentFlowStage =
@@ -143,6 +152,7 @@ export class AlgorandAdapter implements ChainAdapter<AlgorandState> {
 
   private readonly account: algosdk.Account;
   private readonly algod: algosdk.Algodv2;
+  private readonly scheme: ExactAvmScheme;
   private readonly resourceEndpoint: string;
   private readonly network: string;
   private readonly defaultAsset: number;
@@ -171,12 +181,25 @@ export class AlgorandAdapter implements ChainAdapter<AlgorandState> {
       config.algodPort ?? "",
     );
 
+    // toClientAvmSigner expects the 64-byte ed25519 secret key (seed + pubkey)
+    // base64-encoded. algosdk stores exactly that in account.sk, so we convert
+    // the mnemonic-derived key rather than asking callers for a second format.
+    const signer = toClientAvmSigner(Buffer.from(this.account.sk).toString("base64"));
+    // ExactAvmScheme calls algodClient.suggestedParams() (modern AlgodClient
+    // API), so it must build its own client from the URL/token — algosdk's
+    // Algodv2 (kept above for finality) is not compatible here.
+    this.scheme = new ExactAvmScheme(signer, {
+      algodUrl: config.algodUrl,
+      algodToken: config.algodToken ?? "",
+    });
+
     this.network = config.network ?? ALGORAND_MAINNET_CAIP2;
-    // Default asset: USDC. Testnet uses USDC_TESTNET_ASA_ID; mainnet USDC ASA is
-    // 31566704. CONFIRM the mainnet constant export name in @x402-avm/avm.
+    // Default asset: USDC, resolved from the GoPlausible ASA-id constants.
     this.defaultAsset =
       config.asset ??
-      (this.network === ALGORAND_TESTNET_CAIP2 ? Number(USDC_TESTNET_ASA_ID) : 31566704);
+      Number(
+        this.network === ALGORAND_TESTNET_CAIP2 ? USDC_TESTNET_ASA_ID : USDC_MAINNET_ASA_ID,
+      );
   }
 
   // --- Stage 1: readState -----------------------------------------------------
@@ -243,41 +266,41 @@ export class AlgorandAdapter implements ChainAdapter<AlgorandState> {
   async preparePayment(requirement: PaymentRequirement): Promise<AvmPaymentPayload> {
     const req = requirement as AvmPaymentRequirement;
 
-    const params = await this.algod.getTransactionParams().do();
-
-    // exact-scheme USDC (ASA) transfer to payTo for the required amount.
-    // CONFIRM #3: GoPlausible may wrap this in a fee-abstraction atomic group
-    // where the facilitator co-signs a fee-covering txn (so the buyer needs no
-    // ALGO for gas). For the first transactional version we send a plain ASA
-    // transfer; the atomic-group enhancement is added once confirmed.
-    const txn = algosdk.makeAssetTransferTxnWithSuggestedParamsFromObject({
-      sender: this.account.addr,
-      receiver: req.payTo,
-      amount: BigInt(req.maxAmountRequired),
-      assetIndex: req.asset,
-      suggestedParams: params,
-    });
-
-    const unsignedTxnB64 = Buffer.from(algosdk.encodeUnsignedTransaction(txn)).toString("base64");
-
-    return {
-      requirement: req,
-      unsignedTxnB64,
-      txId: txn.txID(),
+    // Re-shape our requirement into the @x402-avm/core PaymentRequirements
+    // contract. The actual atomic group is built + signed in sign(), which is
+    // where ExactAvmScheme fetches suggested params and ed25519-signs.
+    const sdkRequirement: AvmSdkRequirements = {
+      scheme: "exact",
+      network: req.network as AvmSdkRequirements["network"],
+      asset: String(req.asset),
+      amount: req.maxAmountRequired,
+      payTo: req.payTo,
+      maxTimeoutSeconds: req.maxTimeoutSeconds ?? 60,
+      extra: req.extra ?? {},
     };
+
+    return { requirement: req, sdkRequirement };
   }
 
   // --- Stage 3: sign ----------------------------------------------------------
   async sign(payload: PaymentPayload): Promise<SignedPayload> {
     const p = payload as AvmPaymentPayload;
-    const unsigned = algosdk.decodeUnsignedTransaction(
-      Buffer.from(p.unsignedTxnB64, "base64"),
-    );
-    const signedBytes = unsigned.signTxn(this.account.sk);
-    return {
-      payload: p,
-      signature: Buffer.from(signedBytes).toString("base64"),
+
+    // ExactAvmScheme builds the (optionally fee-abstracted) atomic group and
+    // ed25519-signs the client transactions, returning the x402 v2 partial
+    // payload { paymentGroup, paymentIndex }.
+    const partial = await this.scheme.createPaymentPayload(2, p.sdkRequirement);
+
+    // Assemble the full x402 PaymentPayload exactly as the reference HTTP client
+    // does, then base64-encode it for the PAYMENT-SIGNATURE header.
+    const wire: AvmWirePayload = {
+      x402Version: 2,
+      payload: partial.payload,
+      resource: { url: p.requirement.resource },
+      accepted: p.sdkRequirement,
     };
+
+    return { payload: p, signature: encodePaymentSignatureHeader(wire) };
   }
 
   // --- Stage 4: submit --------------------------------------------------------
@@ -285,31 +308,34 @@ export class AlgorandAdapter implements ChainAdapter<AlgorandState> {
     const payload = signed.payload as AvmPaymentPayload;
     const requirement = payload.requirement;
 
-    // CONFIRM #2: the exact x402-avm payment header name + JSON shape.
-    // OpenLedger uses base64(X402WirePayload) in a PAYMENT-SIGNATURE header and
-    // re-requests the resource. The AVM equivalent wraps the signed txn group.
-    const wire = {
-      x402Version: 2,
-      scheme: "exact",
-      network: requirement.network,
-      payload: {
-        signedTxns: [signed.signature], // base64 signed txn(s)
-      },
-    };
-    const paymentHeader = Buffer.from(JSON.stringify(wire)).toString("base64");
-
+    // x402 v2 carries the encoded payload in the PAYMENT-SIGNATURE header; the
+    // facilitator-backed resource verifies + settles inline and replies with a
+    // base64 SettleResponse in PAYMENT-RESPONSE (X-PAYMENT-RESPONSE fallback).
     const res = await fetch(requirement.resource, {
       method: "GET",
       headers: {
         Accept: "application/json",
-        "X-PAYMENT": paymentHeader, // CONFIRM header name
+        "PAYMENT-SIGNATURE": signed.signature,
       },
     });
 
-    const accepted = res.ok; // 200 → server verified + settled inline
     const responseData = await safeJson(res);
-    // CONFIRM: tx hash header name (OpenLedger reads X-PAYMENT-TX-HASH).
-    const txHash = res.headers.get("X-PAYMENT-TX-HASH") ?? payload.txId ?? null;
+
+    const settleHeader =
+      res.headers.get("PAYMENT-RESPONSE") ?? res.headers.get("X-PAYMENT-RESPONSE");
+    let settle: SettleResponse | null = null;
+    if (settleHeader) {
+      try {
+        settle = decodePaymentResponseHeader(settleHeader) as SettleResponse;
+      } catch {
+        settle = null;
+      }
+    }
+
+    // 200 → server settled inline. If a SettleResponse is present, honour its
+    // success flag; otherwise fall back to the HTTP status.
+    const accepted = res.ok && (settle ? settle.success : true);
+    const txHash = settle?.transaction ?? null;
 
     return {
       accepted,
