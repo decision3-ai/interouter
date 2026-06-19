@@ -1,0 +1,158 @@
+/**
+ * AlgorandAdapter tests.
+ *
+ * These exercise the adapter's lifecycle WITHOUT hitting the real network:
+ * `fetch` is stubbed. This keeps them in the unit-test suite (fast,
+ * deterministic) alongside the other adapter tests. Real testnet settlement is
+ * a separate integration step.
+ */
+
+import { describe, it, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import algosdk from "algosdk";
+import { AlgorandAdapter, AlgorandAdapterError } from "./AlgorandAdapter.js";
+import type { RouteContext } from "../router.js";
+
+const ctx: RouteContext = { path: "/api/inference", params: {} };
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeResponse(
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Response {
+  const lc = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    json: () => Promise.resolve(body),
+    headers: { get: (key: string) => lc[key.toLowerCase()] ?? null },
+  } as unknown as Response;
+}
+
+/** Captures all fetch calls and their arguments for inspection. */
+function spyFetch(...responses: Response[]): { calls: Request[]; fn: typeof fetch } {
+  const calls: Request[] = [];
+  let i = 0;
+  const fn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push(new Request(input, init));
+    return responses[i++] ?? makeResponse(500, { error: "no mock response" });
+  }) as typeof fetch;
+  return { calls, fn };
+}
+
+/** Builds an adapter with a fresh, checksum-valid throwaway mnemonic. */
+function makeAdapter(): AlgorandAdapter {
+  const acct = algosdk.generateAccount();
+  const mnemonic = algosdk.secretKeyToMnemonic(acct.sk);
+  return new AlgorandAdapter({
+    mnemonic,
+    resourceEndpoint: "https://example.test/api/inference",
+    algodUrl: "https://testnet-api.test",
+    network: undefined, // defaults to mainnet const; fine for unit tests
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Restore fetch and env between tests
+// ---------------------------------------------------------------------------
+
+const _originalFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = _originalFetch;
+  delete process.env["ALGORAND_MNEMONIC"];
+});
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe("AlgorandAdapter", () => {
+  it("1. throws if no mnemonic is provided", () => {
+    delete process.env["ALGORAND_MNEMONIC"];
+    assert.throws(
+      () =>
+        new AlgorandAdapter({
+          resourceEndpoint: "https://example.test/api/inference",
+          algodUrl: "https://testnet-api.test",
+        }),
+      AlgorandAdapterError,
+    );
+  });
+
+  it("2. throws on an invalid mnemonic", () => {
+    assert.throws(
+      () =>
+        new AlgorandAdapter({
+          mnemonic: "not a real mnemonic",
+          resourceEndpoint: "https://example.test/api/inference",
+          algodUrl: "https://testnet-api.test",
+        }),
+      AlgorandAdapterError,
+    );
+  });
+
+  it("3. readState returns paymentRequired: null when resource is open (non-402)", async () => {
+    const adapter = makeAdapter();
+    const spy = spyFetch(makeResponse(200, { ok: true }));
+    globalThis.fetch = spy.fn;
+
+    const result = await adapter.readState(ctx);
+    assert.equal(result.paymentRequired, null);
+    assert.equal(result.state.flow, "idle");
+  });
+
+  it("4. readState surfaces an AVM PaymentRequirement on 402", async () => {
+    const adapter = makeAdapter();
+    const requirement = {
+      scheme: "exact",
+      network: "algorand:test",
+      maxAmountRequired: "10000",
+      payTo: "RECEIVER".padEnd(58, "A"),
+      asset: 12345,
+      resource: "https://example.test/api/inference",
+    };
+    const spy = spyFetch(makeResponse(402, { accepts: [requirement] }));
+    globalThis.fetch = spy.fn;
+
+    const result = await adapter.readState(ctx);
+    assert.notEqual(result.paymentRequired, null);
+    assert.equal(result.paymentRequired?.scheme, "exact");
+    assert.equal(result.paymentRequired?.maxAmountRequired, "10000");
+    assert.equal(result.state.flow, "requirement-read");
+  });
+
+  it("5. throws if 402 returns a malformed requirement", async () => {
+    const adapter = makeAdapter();
+    const spy = spyFetch(makeResponse(402, { accepts: [{}] }));
+    globalThis.fetch = spy.fn;
+
+    await assert.rejects(adapter.readState(ctx), AlgorandAdapterError);
+  });
+
+  it("6. does NOT populate actualCharge (exact scheme → no circuit breaker)", async () => {
+    const adapter = makeAdapter();
+    const requirement = {
+      scheme: "exact" as const,
+      network: "algorand:test",
+      maxAmountRequired: "10000",
+      payTo: "RECEIVER".padEnd(58, "A"),
+      asset: 12345,
+      resource: "https://example.test/api/inference",
+    };
+    const spy = spyFetch(makeResponse(200, { ok: true }, { "X-PAYMENT-TX-HASH": "TESTHASH" }));
+    globalThis.fetch = spy.fn;
+
+    const signed = {
+      payload: { requirement, unsignedTxnB64: "", txId: "TESTHASH" },
+      signature: "c2lnbmF0dXJl",
+    };
+    const submission = await adapter.submit(signed as never, ctx);
+    assert.equal(submission.actualCharge, undefined);
+    assert.equal(submission.accepted, true);
+    assert.equal(submission.txHash, "TESTHASH");
+  });
+});

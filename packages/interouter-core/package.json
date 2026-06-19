@@ -42,10 +42,13 @@
   "scripts": {
     "build": "tsc --project tsconfig.json",
     "typecheck": "tsc --project tsconfig.json --noEmit",
-    "test": "tsx --test src/router.test.ts src/adapters/NearAdapter.test.ts src/adapters/OpenLedgerAdapter.test.ts src/adapters/OpenGradientAdapter.test.ts",
+    "test": "tsx --test src/router.test.ts src/adapters/NearAdapter.test.ts src/adapters/OpenLedgerAdapter.test.ts src/adapters/OpenGradientAdapter.test.ts src/adapters/AlgorandAdapter.test.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@x402-avm/avm": "^2.6.1",
+    "@x402-avm/core": "^2.6.1",
+    "algosdk": "^3.6.0",
     "near-api-js": "^7.2.0",
     "viem": "^2.49.3"
   },

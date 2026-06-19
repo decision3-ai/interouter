@@ -51,3 +51,5 @@ export type {
   OpenGradientWirePayload,
 } from "./adapters/OpenGradientAdapter.js";
 export { OpenGradientAdapterError } from "./adapters/OpenGradientAdapter.js";
+
+export { AlgorandAdapter } from "./adapters/AlgorandAdapter.js";
