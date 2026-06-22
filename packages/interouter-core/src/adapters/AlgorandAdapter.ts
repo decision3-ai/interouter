@@ -42,6 +42,7 @@ import {
 import {
   encodePaymentSignatureHeader,
   decodePaymentResponseHeader,
+  decodePaymentRequiredHeader,
 } from "@x402-avm/core/http";
 import type {
   PaymentRequirements as AvmSdkRequirements,
@@ -225,28 +226,31 @@ export class AlgorandAdapter implements ChainAdapter<AlgorandState> {
       };
     }
 
-    // 402 → parse the AVM payment requirement.
-    // CONFIRM #1: GoPlausible may put requirements in a PAYMENT-REQUIRED header
-    // (base64 JSON) or in the response body. This reads the body; adjust to match.
-    const body = (await safeJson(res)) as { accepts?: unknown[] } | null;
-    const accept = Array.isArray(body?.accepts) ? body!.accepts[0] : body;
-    const req = accept as Partial<AvmPaymentRequirement> | null;
+    // 402 → parse the AVM payment requirement from the PAYMENT-REQUIRED header.
+    // GoPlausible sends a base64 JSON PaymentRequired object in this header;
+    // the body is empty ({}).
+    const prHeader = res.headers.get("PAYMENT-REQUIRED");
+    if (!prHeader) {
+      throw new AlgorandAdapterError("402 returned but PAYMENT-REQUIRED header is missing");
+    }
 
-    if (!req || req.maxAmountRequired === undefined || !req.payTo) {
-      throw new AlgorandAdapterError("402 returned but AVM requirement is malformed");
+    const paymentRequired = decodePaymentRequiredHeader(prHeader);
+    const sdkReq = paymentRequired.accepts[0];
+    if (!sdkReq?.payTo || !sdkReq.amount) {
+      throw new AlgorandAdapterError("402 PAYMENT-REQUIRED header has no valid accepts entry");
     }
 
     const requirement: AvmPaymentRequirement = {
       scheme: "exact",
-      network: req.network ?? this.network,
-      maxAmountRequired: String(req.maxAmountRequired),
-      payTo: req.payTo,
-      asset: req.asset ?? this.defaultAsset,
-      resource: req.resource ?? this.resourceEndpoint,
-      description: req.description,
-      mimeType: req.mimeType,
-      maxTimeoutSeconds: req.maxTimeoutSeconds,
-      extra: req.extra,
+      network: sdkReq.network ?? this.network,
+      maxAmountRequired: sdkReq.amount,
+      payTo: sdkReq.payTo,
+      asset: Number(sdkReq.asset) || this.defaultAsset,
+      resource: paymentRequired.resource?.url ?? this.resourceEndpoint,
+      description: paymentRequired.resource?.description,
+      mimeType: paymentRequired.resource?.mimeType,
+      maxTimeoutSeconds: sdkReq.maxTimeoutSeconds,
+      extra: sdkReq.extra,
     };
 
     return {

@@ -10,7 +10,7 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import algosdk from "algosdk";
-import { encodePaymentResponseHeader } from "@x402-avm/core/http";
+import { encodePaymentResponseHeader, encodePaymentRequiredHeader } from "@x402-avm/core/http";
 import { AlgorandAdapter, AlgorandAdapterError } from "./AlgorandAdapter.js";
 import type { RouteContext } from "../router.js";
 
@@ -108,15 +108,21 @@ describe("AlgorandAdapter", () => {
 
   it("4. readState surfaces an AVM PaymentRequirement on 402", async () => {
     const adapter = makeAdapter();
-    const requirement = {
-      scheme: "exact",
-      network: "algorand:test",
-      maxAmountRequired: "10000",
-      payTo: "RECEIVER".padEnd(58, "A"),
-      asset: 12345,
-      resource: "https://example.test/api/inference",
-    };
-    const spy = spyFetch(makeResponse(402, { accepts: [requirement] }));
+    // Real wire format: PAYMENT-REQUIRED header holds a base64 PaymentRequired object.
+    const prHeader = encodePaymentRequiredHeader({
+      x402Version: 2,
+      resource: { url: "https://example.test/api/inference", description: "", mimeType: "application/json" },
+      accepts: [{
+        scheme: "exact",
+        network: "algorand:test",
+        amount: "10000",
+        payTo: "RECEIVER".padEnd(58, "A"),
+        asset: "12345",
+        maxTimeoutSeconds: 60,
+        extra: {},
+      }],
+    });
+    const spy = spyFetch(makeResponse(402, {}, { "PAYMENT-REQUIRED": prHeader }));
     globalThis.fetch = spy.fn;
 
     const result = await adapter.readState(ctx);
@@ -126,9 +132,9 @@ describe("AlgorandAdapter", () => {
     assert.equal(result.state.flow, "requirement-read");
   });
 
-  it("5. throws if 402 returns a malformed requirement", async () => {
+  it("5. throws if 402 returns no PAYMENT-REQUIRED header", async () => {
     const adapter = makeAdapter();
-    const spy = spyFetch(makeResponse(402, { accepts: [{}] }));
+    const spy = spyFetch(makeResponse(402, {}));
     globalThis.fetch = spy.fn;
 
     await assert.rejects(adapter.readState(ctx), AlgorandAdapterError);
