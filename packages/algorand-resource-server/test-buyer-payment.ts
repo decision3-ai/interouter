@@ -7,7 +7,7 @@
  */
 
 import { AlgorandAdapter } from "@decision3/interouter-core";
-import { ALGORAND_TESTNET_CAIP2 } from "@x402-avm/avm";
+import { ALGORAND_MAINNET_CAIP2 } from "@x402-avm/avm";
 
 const MNEMONIC =
   "tower genuine second logic attend dizzy else future canoe ski cattle push trick risk salon angry disease eye friend again choose chunk frown ability hub";
@@ -15,8 +15,8 @@ const MNEMONIC =
 const adapter = new AlgorandAdapter({
   mnemonic: MNEMONIC,
   resourceEndpoint: "http://localhost:4021/api/inference",
-  algodUrl: "https://testnet-api.algonode.cloud",
-  network: ALGORAND_TESTNET_CAIP2,
+  algodUrl: "https://mainnet-api.algonode.cloud",
+  network: ALGORAND_MAINNET_CAIP2,
 });
 
 const context = { path: "/api/inference", params: {} };

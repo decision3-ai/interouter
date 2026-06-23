@@ -9,12 +9,10 @@
  *     EvoAgent → Interouter (AlgorandAdapter) → 402 → pay → THIS endpoint → 200
  *                                    settled on Algorand via GoPlausible
  *
- * Built on @x402-avm/express. Starts on TESTNET. Flip the network + facilitator
- * + payTo + asset to MAINNET values once the loop is verified and the leaderboard
- * goes live (mid-July).
+ * Built on @x402-avm/express. Running on MAINNET.
  *
  * Run:
- *   ALGORAND_PAYTO=<your 58-char testnet address> npx tsx server.ts
+ *   ALGORAND_PAYTO=<your 58-char mainnet address> npx tsx server.ts
  */
 
 import express from "express";
@@ -22,8 +20,8 @@ import { paymentMiddlewareFromConfig } from "@x402-avm/express";
 import { HTTPFacilitatorClient } from "@x402-avm/core/http";
 import { ExactAvmScheme } from "@x402-avm/avm/exact/server";
 import {
-  ALGORAND_TESTNET_CAIP2,
-  USDC_TESTNET_ASA_ID,
+  ALGORAND_MAINNET_CAIP2,
+  USDC_MAINNET_ASA_ID,
 } from "@x402-avm/avm";
 
 const app = express();
@@ -51,11 +49,11 @@ app.use(
           scheme: "exact",
           payTo: PAYTO,
           price: {
-            asset: USDC_TESTNET_ASA_ID,
+            asset: USDC_MAINNET_ASA_ID,
             amount: "10000", // 0.01 USDC
             extra: { name: "USDC", decimals: 6 },
           },
-          network: ALGORAND_TESTNET_CAIP2,
+          network: ALGORAND_MAINNET_CAIP2,
           maxTimeoutSeconds: 60,
         },
         description: "EvoAgent inference call",
@@ -63,7 +61,7 @@ app.use(
       },
     },
     facilitator,
-    [{ network: ALGORAND_TESTNET_CAIP2, server: scheme }],
+    [{ network: ALGORAND_MAINNET_CAIP2, server: scheme }],
   ),
 );
 
@@ -85,7 +83,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, () => {
   console.log(`x402 paid endpoint on :${PORT}`);
-  console.log(`  paid:  GET /api/inference   (0.01 USDC, ${ALGORAND_TESTNET_CAIP2})`);
+  console.log(`  paid:  GET /api/inference   (0.01 USDC, ${ALGORAND_MAINNET_CAIP2})`);
   console.log(`  free:  GET /health`);
   console.log(`  payTo: ${PAYTO}`);
   console.log(`  facilitator: ${FACILITATOR_URL}`);
