@@ -101,6 +101,9 @@ TypeScript monorepo. Minimal dependencies. ESM only.
     │   │   ├── dist/
     │   │   └── package.json
     │   └── interouter-near/
+    ├── skills/
+    │   ├── adapter-task.md
+    │   └── debug.md
     ├── ARCHITECTURE.md
     └── CLAUDE.md
 
