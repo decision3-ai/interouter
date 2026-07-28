@@ -27,6 +27,8 @@ import {
 const app = express();
 const PORT = Number(process.env.PORT ?? 4021);
 
+app.use(express.json());
+
 // ── Config ────────────────────────────────────────────────────────────────
 const PAYTO = process.env.ALGORAND_PAYTO ?? "AYZ4QBTBJ2CONYYIPH34UPJ24EPTGFFDAYYKLMMKRRAU2UASYXOZ65OF24";
 // GoPlausible facilitator. CONFIRM the exact competition facilitator URL —
@@ -38,13 +40,11 @@ const facilitator = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
 const scheme = new ExactAvmScheme();
 
 // ── Paid route ───────────────────────────────────────────────────────────
-// One paid endpoint: /api/inference. Priced at 0.01 USDC per call (10000 base
-// units, 6 decimals). This is what EvoAgent pays for — a real, useful call,
-// so the on-chain volume is genuine (judges weight "how real" the activity is).
+// One paid endpoint: POST /api/review. Priced at 0.01 USDC per call.
 app.use(
   paymentMiddlewareFromConfig(
     {
-      "GET /api/inference": {
+      "POST /api/review": {
         accepts: {
           scheme: "exact",
           payTo: PAYTO,
@@ -56,7 +56,7 @@ app.use(
           network: ALGORAND_MAINNET_CAIP2,
           maxTimeoutSeconds: 60,
         },
-        description: "EvoAgent inference call",
+        description: "D3RCP code review",
         mimeType: "application/json",
       },
     },
@@ -66,14 +66,62 @@ app.use(
 );
 
 // ── Handler (runs only AFTER payment is verified by the middleware) ─────────
-app.get("/api/inference", (req, res) => {
-  // In the real loop this calls EvoAgent's brain (Claude API) and returns the
-  // result. Stubbed here so the payment loop can be tested end-to-end first.
+const SYSTEM_PROMPT = `You are a senior code reviewer. The user is paying per request for a structured, actionable review — not a casual chat response. Analyze the submitted code and respond in this exact structure:
+
+## Bugs & Correctness
+[List concrete bugs, logic errors, or edge cases the code doesn't handle. If none found, say so explicitly.]
+
+## Security
+[Flag injection risks, unsafe input handling, exposed secrets, auth issues. If none found, say so explicitly.]
+
+## Performance
+[Note inefficiencies — unnecessary loops, N+1 queries, blocking calls that should be async, etc. If none found, say so explicitly.]
+
+## Suggestions
+[2-3 concrete, prioritized improvements — not generic advice.]
+
+Be direct and specific. Reference exact line numbers or function names where possible. Do not pad the response with generic praise or disclaimers.`;
+
+app.post("/api/review", async (req, res) => {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
+    res.status(500).json({
+      ok: false,
+      error: "DEEPSEEK_API_KEY is not set — configure it before using this endpoint",
+    });
+    return;
+  }
+
+  const { code } = req.body as { code: string };
+
+  const dsRes = await fetch("https://api.deepseek.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: code },
+      ],
+    }),
+  });
+
+  if (!dsRes.ok) {
+    const detail = await dsRes.text();
+    res.status(502).json({ ok: false, error: `DeepSeek API error ${dsRes.status}`, detail });
+    return;
+  }
+
+  const data = await dsRes.json() as { choices: Array<{ message: { content: string } }> };
+  const review = data.choices[0]?.message.content ?? "";
+
   res.json({
     ok: true,
-    service: "evoagent-inference",
-    prompt: req.query["q"] ?? null,
-    result: "stubbed inference result — replace with EvoAgent call once loop is green",
+    service: "d3rcp-code-review",
+    review,
     ts: new Date().toISOString(),
   });
 });
@@ -83,7 +131,7 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, () => {
   console.log(`x402 paid endpoint on :${PORT}`);
-  console.log(`  paid:  GET /api/inference   (0.01 USDC, ${ALGORAND_MAINNET_CAIP2})`);
+  console.log(`  paid:  POST /api/review   (0.01 USDC, ${ALGORAND_MAINNET_CAIP2})`);
   console.log(`  free:  GET /health`);
   console.log(`  payTo: ${PAYTO}`);
   console.log(`  facilitator: ${FACILITATOR_URL}`);
