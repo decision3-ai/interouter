@@ -142,6 +142,10 @@ export interface AlgorandAdapterConfig {
   network?: string;
   /** Payment asset id (ASA). Defaults to USDC for the chosen network. */
   asset?: number;
+  /** HTTP method used for readState and submit requests. Defaults to "GET". */
+  requestMethod?: "GET" | "POST";
+  /** Optional request body — serialized as JSON when requestMethod is "POST". */
+  requestBody?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +161,8 @@ export class AlgorandAdapter implements ChainAdapter<AlgorandState> {
   private readonly resourceEndpoint: string;
   private readonly network: string;
   private readonly defaultAsset: number;
+  private readonly requestMethod: "GET" | "POST";
+  private readonly requestBody: unknown;
 
   constructor(config: AlgorandAdapterConfig) {
     const mnemonic = config.mnemonic ?? process.env["ALGORAND_MNEMONIC"];
@@ -201,13 +207,20 @@ export class AlgorandAdapter implements ChainAdapter<AlgorandState> {
       Number(
         this.network === ALGORAND_TESTNET_CAIP2 ? USDC_TESTNET_ASA_ID : USDC_MAINNET_ASA_ID,
       );
+    this.requestMethod = config.requestMethod ?? "GET";
+    this.requestBody = config.requestBody;
   }
 
   // --- Stage 1: readState -----------------------------------------------------
   async readState(context: RouteContext): Promise<ReadResult<AlgorandState>> {
+    const isPost = this.requestMethod === "POST" && this.requestBody !== undefined;
     const res = await fetch(this.resourceEndpoint, {
-      method: "GET",
-      headers: { Accept: "application/json" },
+      method: this.requestMethod,
+      headers: {
+        Accept: "application/json",
+        ...(isPost ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(isPost ? { body: JSON.stringify(this.requestBody) } : {}),
     });
 
     // Resource is open / already paid → no payment needed.
@@ -315,12 +328,15 @@ export class AlgorandAdapter implements ChainAdapter<AlgorandState> {
     // x402 v2 carries the encoded payload in the PAYMENT-SIGNATURE header; the
     // facilitator-backed resource verifies + settles inline and replies with a
     // base64 SettleResponse in PAYMENT-RESPONSE (X-PAYMENT-RESPONSE fallback).
+    const isPost = this.requestMethod === "POST" && this.requestBody !== undefined;
     const res = await fetch(requirement.resource, {
-      method: "GET",
+      method: this.requestMethod,
       headers: {
         Accept: "application/json",
         "PAYMENT-SIGNATURE": signed.signature,
+        ...(isPost ? { "Content-Type": "application/json" } : {}),
       },
+      ...(isPost ? { body: JSON.stringify(this.requestBody) } : {}),
     });
 
     const responseData = await safeJson(res);

@@ -9,17 +9,24 @@
 import { AlgorandAdapter } from "@decision3/interouter-core";
 import { ALGORAND_MAINNET_CAIP2 } from "@x402-avm/avm";
 
-const MNEMONIC =
-  "tower genuine second logic attend dizzy else future canoe ski cattle push trick risk salon angry disease eye friend again choose chunk frown ability hub";
+const MNEMONIC = process.env.TEST_BUYER_MNEMONIC;
+if (!MNEMONIC) {
+  console.error(
+    "❌ TEST_BUYER_MNEMONIC is not set — add it to .env before running this test",
+  );
+  process.exit(1);
+}
 
 const adapter = new AlgorandAdapter({
   mnemonic: MNEMONIC,
-  resourceEndpoint: "http://localhost:4021/api/inference",
+  resourceEndpoint: "http://localhost:4021/api/review",
   algodUrl: "https://mainnet-api.algonode.cloud",
   network: ALGORAND_MAINNET_CAIP2,
+  requestMethod: "POST",
+  requestBody: { code: "function add(a,b){return a+b}" },
 });
 
-const context = { path: "/api/inference", params: {} };
+const context = { path: "/api/review", params: {} };
 
 async function main() {
   // ── Stage 1: readState ──────────────────────────────────────────────────
