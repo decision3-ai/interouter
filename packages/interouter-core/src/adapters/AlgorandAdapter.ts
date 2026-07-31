@@ -223,6 +223,9 @@ export class AlgorandAdapter implements ChainAdapter<AlgorandState> {
       ...(isPost ? { body: JSON.stringify(this.requestBody) } : {}),
     });
 
+    console.log('DEBUG fetch to:', this.resourceEndpoint, 'method:', this.requestMethod, 'body:', JSON.stringify(this.requestBody));
+    console.log('DEBUG response status:', res.status);
+
     // Resource is open / already paid → no payment needed.
     if (res.status !== 402) {
       const result = await safeJson(res);
