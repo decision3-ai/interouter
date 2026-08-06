@@ -23,6 +23,7 @@ import {
   ALGORAND_MAINNET_CAIP2,
   USDC_MAINNET_ASA_ID,
 } from "@x402-avm/avm";
+import { TOOL_CATALOG } from "./catalog.js";
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 4021);
@@ -57,6 +58,21 @@ app.use(
           maxTimeoutSeconds: 60,
         },
         description: "D3RCP code review",
+        mimeType: "application/json",
+      },
+      "POST /api/audit": {
+        accepts: {
+          scheme: "exact",
+          payTo: PAYTO,
+          price: {
+            asset: USDC_MAINNET_ASA_ID,
+            amount: "10000", // 0.01 USDC
+            extra: { name: "USDC", decimals: 6 },
+          },
+          network: ALGORAND_MAINNET_CAIP2,
+          maxTimeoutSeconds: 60,
+        },
+        description: "D3RCP agent audit",
         mimeType: "application/json",
       },
     },
@@ -126,12 +142,102 @@ app.post("/api/review", async (req, res) => {
   });
 });
 
+// ── /api/audit handler ───────────────────────────────────────────────────
+const AUDIT_SYSTEM_PROMPT = `You are an AI agent tool auditor. Analyze the agent's current task and tools, then identify capability gaps and recommend tools from the provided catalog.
+
+CRITICAL: Output ONLY valid JSON. No markdown code fences, no backticks, no explanatory text before or after. Your entire response must be parseable by JSON.parse().
+
+Tool catalog — use ONLY the install_command and source_url values from this list. Do not invent or guess URLs or commands:
+${JSON.stringify(TOOL_CATALOG, null, 2)}
+
+Required output structure:
+{
+  "gaps_identified": [{ "capability_missing": "string", "reasoning": "string" }],
+  "recommendations": [{ "name": "string", "category": "string", "recommend_when": "string", "install_command": "string", "source_url": "string" }],
+  "confidence": "high | medium | low"
+}
+
+Rules:
+1. gaps_identified must always have at least one entry. If no gap exists, explain why (e.g. { "capability_missing": "none", "reasoning": "tools already cover known categories" }).
+2. recommendations must only contain tools from the catalog above. If no catalog tool addresses the gaps, set recommendations to [].
+3. confidence: "high" if task and tools clearly reveal a gap, "medium" if ambiguous, "low" if insufficient context.`;
+
+app.post("/api/audit", async (req, res) => {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
+    res.status(500).json({
+      ok: false,
+      error: "DEEPSEEK_API_KEY is not set — configure it before using this endpoint",
+    });
+    return;
+  }
+
+  const { task, current_tools, context } = req.body as {
+    task: string;
+    current_tools: Array<{ name: string; description: string }>;
+    context?: string;
+  };
+
+  const userMessage = JSON.stringify({
+    task,
+    current_tools,
+    ...(context !== undefined ? { context } : {}),
+  });
+
+  const dsRes = await fetch("https://api.deepseek.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      messages: [
+        { role: "system", content: AUDIT_SYSTEM_PROMPT },
+        { role: "user", content: userMessage },
+      ],
+    }),
+  });
+
+  if (!dsRes.ok) {
+    const detail = await dsRes.text();
+    res.status(502).json({ ok: false, error: `DeepSeek API error ${dsRes.status}`, detail });
+    return;
+  }
+
+  const data = await dsRes.json() as { choices: Array<{ message: { content: string } }> };
+  const raw = data.choices[0]?.message.content ?? "";
+
+  // Strip possible ```json fences before parsing
+  const stripped = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+
+  let audit: unknown;
+  try {
+    audit = JSON.parse(stripped);
+  } catch {
+    res.status(502).json({
+      ok: false,
+      error: "DeepSeek returned non-JSON response",
+      raw: stripped.slice(0, 500),
+    });
+    return;
+  }
+
+  res.json({
+    ok: true,
+    service: "d3rcp-agent-audit",
+    audit,
+    ts: new Date().toISOString(),
+  });
+});
+
 // Free health check (no payment).
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, () => {
   console.log(`x402 paid endpoint on :${PORT}`);
   console.log(`  paid:  POST /api/review   (0.01 USDC, ${ALGORAND_MAINNET_CAIP2})`);
+  console.log(`  paid:  POST /api/audit    (0.01 USDC, ${ALGORAND_MAINNET_CAIP2})`);
   console.log(`  free:  GET /health`);
   console.log(`  payTo: ${PAYTO}`);
   console.log(`  facilitator: ${FACILITATOR_URL}`);
