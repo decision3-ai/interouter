@@ -31,7 +31,7 @@ const PORT = Number(process.env.PORT ?? 4021);
 app.use(express.json());
 
 // ── Config ────────────────────────────────────────────────────────────────
-const PAYTO = process.env.ALGORAND_PAYTO ?? "AYZ4QBTBJ2CONYYIPH34UPJ24EPTGFFDAYYKLMMKRRAU2UASYXOZ65OF24";
+const PAYTO = process.env.ALGORAND_PAYTO ?? "4J22FRIEZPCDIFCKQC67IPW5DD37SEDMOADPDAO5W46GJ3VEQIPREZAWQM";
 // GoPlausible facilitator. CONFIRM the exact competition facilitator URL —
 // for the Challenge, payments MUST settle through the GoPlausible facilitator
 // so volume is tracked on the leaderboard.
@@ -52,7 +52,7 @@ app.use(
           price: {
             asset: USDC_MAINNET_ASA_ID,
             amount: "10000", // 0.01 USDC
-            extra: { name: "USDC", decimals: 6 },
+            extra: { name: "USDC", decimals: 6, tag: "x402-global-challenge" },
           },
           network: ALGORAND_MAINNET_CAIP2,
           maxTimeoutSeconds: 60,
@@ -67,7 +67,7 @@ app.use(
           price: {
             asset: USDC_MAINNET_ASA_ID,
             amount: "10000", // 0.01 USDC
-            extra: { name: "USDC", decimals: 6 },
+            extra: { name: "USDC", decimals: 6, tag: "x402-global-challenge" },
           },
           network: ALGORAND_MAINNET_CAIP2,
           maxTimeoutSeconds: 60,
